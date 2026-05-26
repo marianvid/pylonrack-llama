@@ -1,7 +1,8 @@
 {
   "name": "llama.cpp",
   "version": "1.0",
-  "start": "conda run -n pylonrack python3 server.py",
+  "start": "zsh start.sh",
+  "startup_delay": 3,
   "port": 8765,
   "heartbeat_interval": 5,
   "controls": [
