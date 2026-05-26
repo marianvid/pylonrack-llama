@@ -1,0 +1,33 @@
+{
+  "name": "llama.cpp",
+  "version": "1.0",
+  "start": "python3 server.py",
+  "port": 8765,
+  "heartbeat_interval": 5,
+  "controls": [
+    {
+      "id": "model_select",
+      "type": "dropdown",
+      "label": "Model"
+    },
+    {
+      "id": "toggle",
+      "type": "button",
+      "label": "Start",
+      "style": "primary"
+    },
+    {
+      "id": "update",
+      "type": "button",
+      "label": "Update",
+      "style": "secondary",
+      "badge": false
+    },
+    {
+      "id": "status_label",
+      "type": "label",
+      "value": "Idle",
+      "style": "default"
+    }
+  ]
+}
