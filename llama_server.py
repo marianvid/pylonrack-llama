@@ -88,12 +88,20 @@ class LlamaServer:
                 self._process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self._process.kill()
+                self._process.wait(timeout=3)
 
         # Also terminate any externally started instance on the same port
         pid = self._find_pid()
         if pid:
             try:
-                psutil.Process(pid).terminate()
+                p = psutil.Process(pid)
+                p.terminate()
+                # Wait for external process to actually die — not fire-and-forget
+                try:
+                    p.wait(timeout=5)
+                except psutil.TimeoutExpired:
+                    p.kill()
+                    p.wait(timeout=3)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 

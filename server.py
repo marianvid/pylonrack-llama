@@ -107,6 +107,7 @@ def _pong(state: AppState) -> dict:
     reqs     = metrics.get("requests_processing", 0)
     ram_used = ram["llama"]["used_gb"]
     msg      = f"{ram_used} GB RAM · {reqs} req" if running else _status_text(state)
+    # status "warning" when connected to slot but llama not running — rack shows no WebView
     return {
         "type":    "pong",
         "status":  "running" if running else "warning",
@@ -234,7 +235,16 @@ class SlotHandler:
 
     async def _handle_toggle(self, ws: WebSocketServerProtocol) -> None:
         if self._state.llama.is_running:
-            self._state.llama.stop()
+            # Send immediate feedback BEFORE blocking stop()
+            await self._send(ws, {
+                "type": "controls_update",
+                "controls": [
+                    {"id": "toggle",       "label": "Stopping…", "style": "secondary"},
+                    {"id": "status_label", "value": "Stopping…", "style": "warning"},
+                ],
+            })
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._state.llama.stop)
             await self._broadcast_update(ws)
         else:
             path = self._state.selected_path()
@@ -248,8 +258,14 @@ class SlotHandler:
                 })
                 return
 
-            # Start in background thread — blocks until ready
-            await self._broadcast_update(ws)  # show "Starting…" immediately
+            # Send immediate feedback BEFORE blocking start()
+            await self._send(ws, {
+                "type": "controls_update",
+                "controls": [
+                    {"id": "toggle",       "label": "Starting…", "style": "secondary"},
+                    {"id": "status_label", "value": "Starting…", "style": "warning"},
+                ],
+            })
 
             loop = asyncio.get_event_loop()
             ok   = await loop.run_in_executor(None, self._state.llama.start, path)
