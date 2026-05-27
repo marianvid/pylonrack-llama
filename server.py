@@ -220,6 +220,9 @@ class SlotHandler:
                     loop = asyncio.get_event_loop()
                     ok   = await loop.run_in_executor(None, self._state.llama.start, match.full_path)
                     await self._broadcast_update(ws)
+                    if ok:
+                        # Signal rack to reload WebView
+                        await self._send(ws, {"type": "reload_ui"})
                 else:
                     await self._broadcast_update(ws)
 

@@ -185,17 +185,23 @@ class LlamaServer:
         return False
 
     def _find_pid(self) -> int | None:
+        """Find llama-server PID listening on our port. Uses lsof (no root needed on macOS)."""
         port = self._cfg.server.port
         try:
-            for conn in psutil.net_connections(kind="tcp"):
-                if conn.laddr.port == port and conn.status == "LISTEN" and conn.pid:
-                    try:
-                        if "llama" in psutil.Process(conn.pid).name().lower():
-                            return conn.pid
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-        except Exception:
-            pass
+            result = subprocess.run(
+                ["lsof", "-iTCP:%d" % port, "-sTCP:LISTEN", "-t"],
+                capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.strip().splitlines():
+                pid = int(line.strip())
+                try:
+                    name = psutil.Process(pid).name().lower()
+                    if "llama" in name:
+                        return pid
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except Exception as exc:
+            log.debug("_find_pid error: %s", exc)
         return None
 
     def _active_pid(self) -> int | None:
