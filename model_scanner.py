@@ -42,7 +42,9 @@ def scan(hf_cache_path: Path) -> list[GGUFModel]:
     models: list[GGUFModel] = []
 
     for gguf_file in sorted(hf_cache_path.rglob("*.gguf")):
-        # Find the models--* ancestor directory
+        # Skip projection/vision models — not inference models
+        if "mmproj" in gguf_file.name.lower():
+            continue
         repo_dir = gguf_file.parent
         for ancestor in gguf_file.parents:
             if ancestor.name.startswith("models--"):
