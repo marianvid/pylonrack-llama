@@ -396,7 +396,6 @@ class SlotHandler:
                     search=query,
                     filter="gguf",
                     sort="downloads",
-                    direction=-1,
                     limit=30,
                 ):
                     results.append({
