@@ -45,6 +45,34 @@ class AppState:
         self.selected_model: GGUFModel | None = None
         self.update_in_progress: bool = False
         self.update_available:   bool = False
+        self.log_subscribers: set = set()   # active WebSocket connections subscribed to log
+
+        # Wire up live log push
+        self.llama.on_log_line = self._on_log_line
+
+    def _on_log_line(self, line: str) -> None:
+        """Called from log thread — schedule push to all subscribers."""
+        import asyncio
+        for ws in list(self.log_subscribers):
+            try:
+                loop = asyncio.get_event_loop()
+                asyncio.run_coroutine_threadsafe(
+                    self._push_log_line(ws, line), loop
+                )
+            except Exception:
+                pass
+
+    @staticmethod
+    async def _push_log_line(ws, line: str) -> None:
+        try:
+            import json
+            await ws.send(json.dumps({
+                "type":  "log_response",
+                "lines": [line],
+                "total": -1,   # -1 = streaming append (not a full fetch)
+            }))
+        except Exception:
+            pass
 
     def refresh_models(self) -> None:
         self.models = scan(self.cfg.hf_cache_path)
@@ -148,6 +176,8 @@ class SlotHandler:
                 await self._dispatch(ws, raw)
         except websockets.exceptions.ConnectionClosed:
             pass
+        finally:
+            self._state.log_subscribers.discard(ws)
         log.info("Rack disconnected")
 
     async def _dispatch(self, ws: WebSocketServerProtocol, raw: str) -> None:
@@ -173,8 +203,11 @@ class SlotHandler:
             await self._handle_action(ws, msg)
 
         elif msg_type == "log_request":
-            n      = msg.get("lines", 50)
-            lines  = self._state.llama.log_tail(n)
+            # Subscribe to live log stream
+            self._state.log_subscribers.add(ws)
+            # Send existing tail immediately
+            n     = msg.get("lines", 50)
+            lines = self._state.llama.log_tail(n)
             await self._send(ws, {"type": "log_response", "lines": lines, "total": len(lines)})
 
         elif msg_type == "shutdown":

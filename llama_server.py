@@ -33,11 +33,12 @@ class LlamaServer:
     """Manages a single llama-server process."""
 
     def __init__(self, cfg: AppConfig) -> None:
-        self._cfg        = cfg
-        self._process:   subprocess.Popen | None = None
-        self._start_time: datetime | None        = None
-        self._model_path: str | None             = None
+        self._cfg         = cfg
+        self._process:    subprocess.Popen | None = None
+        self._start_time: datetime | None         = None
+        self._model_path: str | None              = None
         self._log_thread: threading.Thread | None = None
+        self.on_log_line: callable | None         = None  # callback(line: str)
 
     # ------------------------------------------------------------------
     # Public API
@@ -229,6 +230,10 @@ class LlamaServer:
                         fh.close()
                         self._rotate_log(log_path)
                         fh = open(log_path, "ab")
+                    # Push line to subscribers
+                    line = raw.decode(errors="replace").rstrip()
+                    if line and self.on_log_line:
+                        self.on_log_line(line)
                 except Exception:
                     pass
         finally:
