@@ -537,14 +537,15 @@ class SlotHandler:
 # ---------------------------------------------------------------------------
 
 async def _check_updates_periodically(state: AppState) -> None:
-    """Poll for git updates every 30 minutes."""
+    """Check for updates at startup and then every 30 minutes."""
     while True:
-        await asyncio.sleep(1800)
         if not state.update_in_progress and state.cfg.repo_path.exists():
             has = await asyncio.get_event_loop().run_in_executor(
                 None, state.updater.has_update
             )
             state.update_available = has
+            log.info("Update available: %s", has)
+        await asyncio.sleep(1800)
 
 
 # ---------------------------------------------------------------------------
