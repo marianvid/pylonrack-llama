@@ -353,36 +353,42 @@ class SlotHandler:
             self._state.llama.stop()
 
         self._state.update_in_progress = True
+        # Subscribe ws to log stream so update output appears live in log panel
+        self._state.log_subscribers.add(ws)
         await self._broadcast_update(ws)
+
+        # Switch rack to log panel automatically
+        await self._send(ws, {"type": "show_log"})
 
         loop = asyncio.get_event_loop()
 
         def _run_update():
-            lines = []
-            def on_line(line):
-                lines.append(line)
-            ok = self._state.updater.update(on_line)
-            return ok, lines
+            def on_line(line: str):
+                # Push each line live to log subscribers
+                for sub in list(self._state.log_subscribers):
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            self._state._push_log_line(sub, line), loop
+                        )
+                    except Exception:
+                        pass
+            return self._state.updater.update(on_line)
 
-        ok, lines = await loop.run_in_executor(None, _run_update)
+        ok = await loop.run_in_executor(None, _run_update)
 
         self._state.update_in_progress = False
         self._state.update_available   = False
 
-        # Send log lines as log_response so rack shows them in log panel
-        await self._send(ws, {
-            "type":  "log_response",
-            "lines": lines,
-            "total": len(lines),
-        })
+        # Refresh version label after successful build
+        if ok:
+            self._state.llama_version = _get_llama_version(self._state.cfg)
 
         await self._broadcast_update(ws)
 
         if was_running and ok:
             path = self._state.selected_path()
             if path:
-                loop2 = asyncio.get_event_loop()
-                ok2 = await loop2.run_in_executor(None, self._state.llama.start, path)
+                ok2 = await loop.run_in_executor(None, self._state.llama.start, path)
                 if ok2:
                     await self._broadcast_update(ws)
 
