@@ -266,6 +266,21 @@ class SlotHandler:
         elif control_id == "update":
             await self._handle_update(ws)
 
+        elif control_id == "list_local_models":
+            await self._handle_list_local_models(ws)
+
+        elif control_id == "hf_search":
+            await self._handle_hf_search(ws, value)
+
+        elif control_id == "hf_model_files":
+            await self._handle_hf_model_files(ws, value)
+
+        elif control_id == "hf_download":
+            await self._handle_hf_download(ws, value)
+
+        elif control_id == "delete_model":
+            await self._handle_delete_model(ws, value)
+
     async def _handle_toggle(self, ws: WebSocketServerProtocol) -> None:
         if self._state.llama.is_running:
             # Send immediate feedback BEFORE blocking stop()
@@ -353,6 +368,162 @@ class SlotHandler:
 
     async def _broadcast_update(self, ws: WebSocketServerProtocol) -> None:
         await self._send(ws, _controls_update(self._state))
+
+    # MARK: - Model Manager handlers
+
+    async def _handle_list_local_models(self, ws: WebSocketServerProtocol) -> None:
+        self._state.refresh_models()
+        models = [
+            {"display_name": m.display_name, "full_path": m.full_path, "size_gb": m.size_gb}
+            for m in self._state.models
+        ]
+        await self._send(ws, {
+            "type":   "action_result",
+            "action": "local_models",
+            "data":   {"type": "local_models", "models": models},
+        })
+
+    async def _handle_hf_search(self, ws: WebSocketServerProtocol, query: str | None) -> None:
+        if not query:
+            return
+        loop = asyncio.get_event_loop()
+
+        def _search():
+            try:
+                from huggingface_hub import list_models
+                results = []
+                for m in list_models(
+                    search=query,
+                    filter="gguf",
+                    sort="downloads",
+                    direction=-1,
+                    limit=30,
+                ):
+                    results.append({
+                        "id":          m.id,
+                        "downloads":   getattr(m, "downloads", None),
+                        "likes":       getattr(m, "likes", None),
+                        "description": (getattr(m, "description", None) or "")[:200],
+                    })
+                return results
+            except Exception as e:
+                log.error("HF search error: %s", e)
+                return []
+
+        results = await loop.run_in_executor(None, _search)
+        await self._send(ws, {
+            "type":   "action_result",
+            "action": "hf_search_results",
+            "data":   {"type": "hf_search_results", "results": results},
+        })
+
+    async def _handle_hf_model_files(self, ws: WebSocketServerProtocol, repo_id: str | None) -> None:
+        if not repo_id:
+            return
+        loop = asyncio.get_event_loop()
+
+        def _list_files():
+            try:
+                from huggingface_hub import list_repo_files, get_paths_info
+                files = []
+                for info in get_paths_info(repo_id, [
+                    f for f in list_repo_files(repo_id)
+                    if f.endswith(".gguf") and "mmproj" not in f.lower()
+                ]):
+                    files.append({
+                        "name": info.path.split("/")[-1],
+                        "size": info.size or 0,
+                    })
+                return sorted(files, key=lambda f: f["name"])
+            except Exception as e:
+                log.error("HF files error: %s", e)
+                return []
+
+        files = await loop.run_in_executor(None, _list_files)
+        await self._send(ws, {
+            "type":   "action_result",
+            "action": "hf_model_files_result",
+            "data":   {"type": "hf_model_files_result", "files": files},
+        })
+
+    async def _handle_hf_download(self, ws: WebSocketServerProtocol, value: str | None) -> None:
+        if not value or "/" not in value:
+            return
+        # value = "org/repo/filename.gguf"
+        parts    = value.split("/")
+        filename = parts[-1]
+        repo_id  = "/".join(parts[:-1])
+        loop     = asyncio.get_event_loop()
+
+        async def send_progress(progress: float):
+            await self._send(ws, {
+                "type":   "action_result",
+                "action": "download_progress",
+                "data":   {"type": "download_progress", "progress": progress},
+            })
+
+        def _download():
+            try:
+                from huggingface_hub import hf_hub_download
+                import os
+
+                dest_dir = self._state.cfg.hf_cache_path / f"models--{repo_id.replace('/', '--')}" / "snapshots" / "downloaded"
+                dest_dir.mkdir(parents=True, exist_ok=True)
+
+                # Use hf_hub_download with cache_dir
+                path = hf_hub_download(
+                    repo_id=repo_id,
+                    filename=filename,
+                    cache_dir=str(self._state.cfg.hf_cache_path),
+                    local_dir=None,
+                )
+                return path, None
+            except Exception as e:
+                return None, str(e)
+
+        # Send progress updates while downloading
+        await send_progress(0.0)
+        path, error = await loop.run_in_executor(None, _download)
+
+        if error:
+            await self._send(ws, {
+                "type":   "action_result",
+                "action": "download_error",
+                "data":   {"type": "download_error", "message": error},
+            })
+        else:
+            self._state.refresh_models()
+            await self._send(ws, {
+                "type":   "action_result",
+                "action": "download_complete",
+                "data":   {"type": "download_complete"},
+            })
+
+    async def _handle_delete_model(self, ws: WebSocketServerProtocol, path: str | None) -> None:
+        if not path:
+            return
+        loop = asyncio.get_event_loop()
+
+        def _delete():
+            try:
+                import os
+                os.remove(path)
+                return True, None
+            except Exception as e:
+                return False, str(e)
+
+        ok, error = await loop.run_in_executor(None, _delete)
+        self._state.refresh_models()
+        # Update model_select dropdown after delete
+        if self._state.selected_model and self._state.selected_model.full_path == path:
+            self._state.selected_model = self._state.models[0] if self._state.models else None
+
+        await self._send(ws, {
+            "type":   "action_result",
+            "action": "delete_complete",
+            "data":   {"type": "delete_complete"},
+        })
+        await self._broadcast_update(ws)
 
     @staticmethod
     async def _send(ws: WebSocketServerProtocol, data: dict) -> None:
