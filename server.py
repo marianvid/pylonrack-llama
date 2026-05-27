@@ -77,25 +77,27 @@ def _manifest(cfg) -> dict:
 
 def _controls_update(state: AppState) -> dict:
     running = state.llama.is_running
-    return {
-        "type": "controls_update",
-        "controls": [
-            {
-                "id":    "toggle",
-                "label": "Stop" if running else "Start",
-                "style": "destructive" if running else "primary",
-            },
-            {
-                "id":    "status_label",
-                "value": _status_text(state),
-                "style": _status_style(state),
-            },
-            {
-                "id":    "update",
-                "badge": state.update_available,
-            },
-        ],
-    }
+    controls = [
+        {
+            "id":    "model_select",
+            "value": state.selected_model.display_name if state.selected_model else "",
+        },
+        {
+            "id":    "toggle",
+            "label": "Stop" if running else "Start",
+            "style": "destructive" if running else "primary",
+        },
+        {
+            "id":    "status_label",
+            "value": _status_text(state),
+            "style": _status_style(state),
+        },
+        {
+            "id":    "update",
+            "badge": state.update_available,
+        },
+    ]
+    return {"type": "controls_update", "controls": controls}
 
 
 def _pong(state: AppState) -> dict:
@@ -194,11 +196,32 @@ class SlotHandler:
         value      = msg.get("value")
 
         if control_id == "model_select" and value:
-            # Map display name back to GGUFModel
             match = next((m for m in self._state.models if m.display_name == value), None)
             if match:
                 self._state.selected_model = match
-            await self._broadcast_update(ws)
+                was_running = self._state.llama.is_running
+
+                # Update dropdown selection in rack immediately
+                await self._send(ws, {
+                    "type": "controls_update",
+                    "controls": [{"id": "model_select", "value": value}],
+                })
+
+                if was_running:
+                    # Restart with new model
+                    self._state.llama.stop()
+                    await self._send(ws, {
+                        "type": "controls_update",
+                        "controls": [
+                            {"id": "toggle",       "label": "Starting…", "style": "secondary"},
+                            {"id": "status_label", "value": f"Loading {match.display_name}…", "style": "warning"},
+                        ],
+                    })
+                    loop = asyncio.get_event_loop()
+                    ok   = await loop.run_in_executor(None, self._state.llama.start, match.full_path)
+                    await self._broadcast_update(ws)
+                else:
+                    await self._broadcast_update(ws)
 
         elif control_id == "toggle":
             await self._handle_toggle(ws)
