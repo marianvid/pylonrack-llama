@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import subprocess
 import threading
 from pathlib import Path
 
@@ -23,6 +24,21 @@ import config as cfg_module
 from llama_server import LlamaServer
 from model_scanner import GGUFModel, scan
 from git_updater import GitUpdater
+
+import re
+
+def _get_llama_version(cfg) -> str:
+    """Extract build number from llama-server --version output."""
+    try:
+        result = subprocess.run(
+            [str(cfg.bin_path), "--version"],
+            capture_output=True, text=True, timeout=5
+        )
+        m = re.search(r"version:\s*(\d+)", result.stderr)
+        return f"b{m.group(1)}" if m else "llama"
+    except Exception:
+        return "llama"
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,7 +61,8 @@ class AppState:
         self.selected_model: GGUFModel | None = None
         self.update_in_progress: bool = False
         self.update_available:   bool = False
-        self.log_subscribers: set = set()   # active WebSocket connections subscribed to log
+        self.log_subscribers: set = set()
+        self.llama_version:   str = _get_llama_version(self.cfg)
 
         # Wire up live log push
         self.llama.on_log_line = self._on_log_line
@@ -87,19 +104,20 @@ class AppState:
 # PylonRack message builders
 # ---------------------------------------------------------------------------
 
-def _manifest(cfg) -> dict:
+def _manifest(state: AppState) -> dict:
     return {
         "type":    "manifest",
         "name":    "llama.cpp",
         "version": "1.0",
         "heartbeat_interval": 5,
         "controls": [
-            {"id": "model_select",  "type": "dropdown", "label": "Model"},
-            {"id": "toggle",        "type": "button",   "label": "Start",  "style": "primary"},
-            {"id": "update",        "type": "button",   "label": "Update", "style": "secondary", "badge": False},
-            {"id": "status_label",  "type": "label",    "value": "Idle",   "style": "default"},
+            {"id": "model_select", "type": "dropdown", "label": "Model"},
+            {"id": "toggle",       "type": "button",   "label": "Start", "style": "primary"},
+            {"id": "status_label", "type": "label",    "value": "Idle",  "style": "default"},
+            {"id": "update",       "type": "button",   "label": state.llama_version,
+             "style": "secondary", "badge": state.update_available},
         ],
-        "ui_url": cfg.openwebui_url,
+        "ui_url": state.cfg.openwebui_url,
     }
 
 
@@ -168,15 +186,18 @@ class SlotHandler:
 
     def __init__(self, state: AppState) -> None:
         self._state = state
+        self.clients: set = set()   # all currently connected WebSocket clients
 
     async def handle(self, ws: WebSocketServerProtocol) -> None:
         log.info("Rack connected from %s", ws.remote_address)
+        self.clients.add(ws)
         try:
             async for raw in ws:
                 await self._dispatch(ws, raw)
         except websockets.exceptions.ConnectionClosed:
             pass
         finally:
+            self.clients.discard(ws)
             self._state.log_subscribers.discard(ws)
         log.info("Rack disconnected")
 
@@ -189,8 +210,7 @@ class SlotHandler:
         msg_type = msg.get("type", "")
 
         if msg_type == "manifest":
-            await self._send(ws, _manifest(self._state.cfg))
-            # Push current control state
+            await self._send(ws, _manifest(self._state))
             await self._send(ws, _controls_update(self._state))
 
         elif msg_type == "ping":
@@ -536,15 +556,25 @@ class SlotHandler:
 # Background tasks
 # ---------------------------------------------------------------------------
 
-async def _check_updates_periodically(state: AppState) -> None:
-    """Check for updates at startup and then every 30 minutes."""
+async def _check_updates_periodically(state: AppState, handler: "SlotHandler") -> None:
+    """Check for updates at startup then every 30 minutes. Push badge to rack."""
     while True:
         if not state.update_in_progress and state.cfg.repo_path.exists():
             has = await asyncio.get_event_loop().run_in_executor(
                 None, state.updater.has_update
             )
-            state.update_available = has
-            log.info("Update available: %s", has)
+            if has != state.update_available:
+                state.update_available = has
+                # Push badge update to all connected clients
+                for ws in list(handler.clients):
+                    try:
+                        await ws.send(json.dumps({
+                            "type":     "controls_update",
+                            "controls": [{"id": "update", "badge": has}],
+                        }))
+                    except Exception:
+                        pass
+                log.info("Update available: %s", has)
         await asyncio.sleep(1800)
 
 
@@ -560,10 +590,8 @@ async def main() -> None:
     state   = AppState()
     state.refresh_models()
 
-    # Initial update check in background
-    asyncio.create_task(_check_updates_periodically(state))
-
     handler = SlotHandler(state)
+    asyncio.create_task(_check_updates_periodically(state, handler))
     log.info("PylonRack llama.cpp slot starting on ws://localhost:%d", port)
 
     async with websockets.serve(handler.handle, "localhost", port):
