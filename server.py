@@ -384,19 +384,19 @@ class SlotHandler:
         })
 
     async def _handle_hf_search(self, ws: WebSocketServerProtocol, query: str | None) -> None:
-        if not query:
-            return
         loop = asyncio.get_event_loop()
+        # Empty query = show top downloaded GGUF models
+        search_query = query.strip() if query else ""
 
         def _search():
             try:
                 from huggingface_hub import list_models
                 results = []
                 for m in list_models(
-                    search=query,
+                    search=search_query if search_query else None,
                     filter="gguf",
                     sort="downloads",
-                    limit=30,
+                    limit=50,
                 ):
                     results.append({
                         "id":          m.id,
