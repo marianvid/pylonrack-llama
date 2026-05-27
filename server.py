@@ -248,7 +248,7 @@ class SlotHandler:
                         "type": "controls_update",
                         "controls": [
                             {"id": "toggle",       "label": "Starting…", "style": "secondary"},
-                            {"id": "status_label", "value": f"Loading {match.display_name}…", "style": "warning"},
+                            {"id": "status_label", "value": "Loading…",  "style": "warning"},
                         ],
                     })
                     loop = asyncio.get_event_loop()
