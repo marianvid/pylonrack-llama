@@ -16,18 +16,40 @@ class GitUpdater:
         self._repo = repo_path
 
     def is_binary_stale(self) -> bool:
-        """Return True if binary is older than source files — needs rebuild."""
+        """Return True if binary version doesn't match current git commit count."""
         binary = self._repo / "build" / "bin" / "llama-server"
         if not binary.exists() or not self._repo.exists():
             return False
-        binary_mtime = binary.stat().st_mtime
-        for ext in ("*.cpp", "*.c", "*.h", "*.cu", "*.metal"):
-            for f in self._repo.rglob(ext):
-                if "build" in f.parts:
-                    continue
-                if f.stat().st_mtime > binary_mtime:
-                    return True
-        return False
+        try:
+            # Get binary version number
+            result = subprocess.run(
+                [str(binary), "--version"],
+                capture_output=True, text=True, timeout=15
+            )
+            import re
+            m = re.search(r"version:\s*(\d+)", result.stderr)
+            if not m:
+                return False
+            binary_version = int(m.group(1))
+
+            # Get current git commit count
+            result2 = subprocess.run(
+                ["git", "rev-list", "--count", "HEAD"],
+                cwd=self._repo,
+                capture_output=True, text=True, timeout=10
+            )
+            if result2.returncode != 0:
+                return False
+            git_version = int(result2.stdout.strip())
+
+            stale = git_version - binary_version > 10
+            if stale:
+                log.info("Binary stale: git=%d binary=%d delta=%d",
+                         git_version, binary_version, git_version - binary_version)
+            return stale
+        except Exception as exc:
+            log.debug("is_binary_stale error: %s", exc)
+            return False
 
     def has_update(self) -> bool:
         """Return True if remote has commits ahead of local HEAD."""
