@@ -15,6 +15,20 @@ class GitUpdater:
     def __init__(self, repo_path: Path) -> None:
         self._repo = repo_path
 
+    def is_binary_stale(self) -> bool:
+        """Return True if binary is older than source files — needs rebuild."""
+        binary = self._repo / "build" / "bin" / "llama-server"
+        if not binary.exists() or not self._repo.exists():
+            return False
+        binary_mtime = binary.stat().st_mtime
+        for ext in ("*.cpp", "*.c", "*.h", "*.cu", "*.metal"):
+            for f in self._repo.rglob(ext):
+                if "build" in f.parts:
+                    continue
+                if f.stat().st_mtime > binary_mtime:
+                    return True
+        return False
+
     def has_update(self) -> bool:
         """Return True if remote has commits ahead of local HEAD."""
         if not self._repo.exists():
@@ -40,16 +54,17 @@ class GitUpdater:
             return False
 
     def update(self, progress_callback=None) -> bool:
-        """Pull and rebuild. Calls progress_callback(line: str) for each output line."""
+        """Pull latest commits and do a clean rebuild."""
         if not self._repo.exists():
             self._emit(progress_callback, "ERROR: repo path does not exist")
             return False
 
         steps = [
-            (["git", "pull", "--ff-only"],               "Pulling latest commits…"),
-            (["cmake", "-B", "build", "-DGGML_METAL=ON"], "Configuring CMake…"),
-            (["cmake", "--build", "build", "--config", "Release", "-j"],
-             "Building llama-server…"),
+            (["git", "pull", "--ff-only"],                    "Pulling latest commits…"),
+            (["cmake", "-B", "build", "-DGGML_METAL=ON",
+              "-DCMAKE_BUILD_TYPE=Release"],                   "Configuring CMake…"),
+            (["cmake", "--build", "build", "--config", "Release",
+              "--target", "llama-server", "--clean-first", "-j"], "Building llama-server…"),
         ]
 
         for cmd, label in steps:
@@ -72,6 +87,9 @@ class GitUpdater:
                 self._emit(progress_callback, f"ERROR: {exc}")
                 return False
 
+        # Verify binary is newer than before
+        binary = self._repo / "build" / "bin" / "llama-server"
+        self._emit(progress_callback, f"Binary: {binary} — built successfully.")
         self._emit(progress_callback, "Update complete.")
         return True
 

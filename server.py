@@ -61,6 +61,7 @@ class AppState:
         self.selected_model: GGUFModel | None = None
         self.update_in_progress: bool = False
         self.update_available:   bool = False
+        self.binary_stale:       bool = False
         self.log_subscribers: set = set()
         self.llama_version:   str = _get_llama_version(self.cfg)
 
@@ -104,6 +105,34 @@ class AppState:
 # PylonRack message builders
 # ---------------------------------------------------------------------------
 
+def _update_control(state: AppState) -> dict:
+    """Build the update button control based on current state."""
+    if state.binary_stale:
+        return {
+            "id":    "update",
+            "type":  "button",
+            "label": state.llama_version,
+            "style": "error",
+            "badge": True,
+        }
+    elif state.update_available:
+        return {
+            "id":    "update",
+            "type":  "button",
+            "label": state.llama_version,
+            "style": "warning",
+            "badge": True,
+        }
+    else:
+        return {
+            "id":    "update",
+            "type":  "button",
+            "label": state.llama_version,
+            "style": "secondary",
+            "badge": False,
+        }
+
+
 def _manifest(state: AppState) -> dict:
     return {
         "type":    "manifest",
@@ -114,8 +143,7 @@ def _manifest(state: AppState) -> dict:
             {"id": "model_select", "type": "dropdown", "label": "Model"},
             {"id": "toggle",       "type": "button",   "label": "Start", "style": "primary"},
             {"id": "status_label", "type": "label",    "value": "Idle",  "style": "default"},
-            {"id": "update",       "type": "button",   "label": state.llama_version,
-             "style": "secondary", "badge": state.update_available},
+            _update_control(state),
         ],
         "ui_url": state.cfg.openwebui_url,
     }
@@ -123,6 +151,7 @@ def _manifest(state: AppState) -> dict:
 
 def _controls_update(state: AppState) -> dict:
     running = state.llama.is_running
+    ctrl    = _update_control(state)
     controls = [
         {
             "id":    "model_select",
@@ -140,7 +169,9 @@ def _controls_update(state: AppState) -> dict:
         },
         {
             "id":    "update",
-            "badge": state.update_available,
+            "label": ctrl["label"],
+            "style": ctrl["style"],
+            "badge": ctrl["badge"],
         },
     ]
     return {"type": "controls_update", "controls": controls}
@@ -566,21 +597,25 @@ async def _check_updates_periodically(state: AppState, handler: "SlotHandler") -
     """Check for updates at startup then every 30 minutes. Push badge to rack."""
     while True:
         if not state.update_in_progress and state.cfg.repo_path.exists():
-            has = await asyncio.get_event_loop().run_in_executor(
+            # Check both: remote updates AND binary staleness
+            has_update   = await asyncio.get_event_loop().run_in_executor(
                 None, state.updater.has_update
             )
-            if has != state.update_available:
-                state.update_available = has
-                # Push badge update to all connected clients
+            binary_stale = await asyncio.get_event_loop().run_in_executor(
+                None, state.updater.is_binary_stale
+            )
+            changed = (has_update != state.update_available or
+                       binary_stale != state.binary_stale)
+            state.update_available = has_update
+            state.binary_stale     = binary_stale
+            if changed:
                 for ws in list(handler.clients):
                     try:
-                        await ws.send(json.dumps({
-                            "type":     "controls_update",
-                            "controls": [{"id": "update", "badge": has}],
-                        }))
+                        await ws.send(json.dumps(_controls_update(state)))
                     except Exception:
                         pass
-                log.info("Update available: %s", has)
+                log.info("Update check: has_update=%s binary_stale=%s",
+                         has_update, binary_stale)
         await asyncio.sleep(1800)
 
 
