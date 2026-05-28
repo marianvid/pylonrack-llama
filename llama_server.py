@@ -50,12 +50,12 @@ class LlamaServer:
             return True
         return self._find_pid() is not None
 
-    def start(self, model_path: str) -> bool:
+    def start(self, model_path: str, draft_model_path: str | None = None) -> bool:
         """Start llama-server with the given model path. Returns True on success."""
         if self.is_running:
             return True
 
-        cmd = self._build_command(model_path)
+        cmd = self._build_command(model_path, draft_model_path)
         log.info("Starting llama-server: %s", " ".join(cmd))
 
         try:
@@ -161,7 +161,7 @@ class LlamaServer:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _build_command(self, model_path: str) -> list[str]:
+    def _build_command(self, model_path: str, draft_model_path: str | None = None) -> list[str]:
         s = self._cfg.server
         cmd = [
             str(self._cfg.bin_path),
@@ -185,6 +185,8 @@ class LlamaServer:
             cmd += ["--flash-attn", "on"]
         if s.mlock:
             cmd.append("--mlock")
+        if draft_model_path:
+            cmd += ["--draft-model", draft_model_path]
         return cmd
 
     def _wait_ready(self) -> bool:

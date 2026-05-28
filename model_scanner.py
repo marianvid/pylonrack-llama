@@ -6,15 +6,31 @@ import re
 from pathlib import Path
 from dataclasses import dataclass
 
+import logging
+log = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class GGUFModel:
     display_name: str   # human-readable label shown in dropdown
     full_path:    str   # absolute path to .gguf file
     size_gb:      float # approximate size in GB
+    vocab_size:   int   = 0  # tokenizer vocab size — used for draft model compatibility
 
     def __str__(self) -> str:
         return self.display_name
+
+
+def _read_vocab_size(path: Path) -> int:
+    """Read vocab size from GGUF metadata. Returns 0 on failure."""
+    try:
+        import gguf
+        r = gguf.GGUFReader(str(path), 'r')
+        toks = r.fields.get("tokenizer.ggml.tokens")
+        return len(toks.data) if toks else 0
+    except Exception as e:
+        log.debug("vocab_size read failed for %s: %s", path.name, e)
+        return 0
 
 
 def _make_display_name(repo_dir: Path, gguf_file: Path) -> str:
@@ -57,13 +73,15 @@ def scan(hf_cache_path: Path) -> list[GGUFModel]:
                 repo_dir = ancestor
                 break
 
-        size_gb = round(gguf_file.stat().st_size / (1024 ** 3), 1)
-        display = _make_display_name(repo_dir, gguf_file)
+        size_gb    = round(gguf_file.stat().st_size / (1024 ** 3), 1)
+        display    = _make_display_name(repo_dir, gguf_file)
+        vocab_size = _read_vocab_size(gguf_file)
 
         models.append(GGUFModel(
             display_name=display,
             full_path=str(gguf_file),
             size_gb=size_gb,
+            vocab_size=vocab_size,
         ))
 
     return models

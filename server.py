@@ -61,6 +61,7 @@ class AppState:
         self.models:    list[GGUFModel] = []
         self.selected_model: GGUFModel | None = None
         self.update_in_progress: bool = False
+        self.draft_model: str | None = None  # full_path of draft model, None = disabled
         self.update_available:   bool = False
         self.binary_stale:       bool = False
         self.log_subscribers: set = set()
@@ -285,6 +286,7 @@ class SlotHandler:
             match = next((m for m in self._state.models if m.display_name == value), None)
             if match:
                 self._state.selected_model = match
+                self._state.draft_model = None  # reset draft — may be incompatible with new model
                 was_running = self._state.llama.is_running
 
                 # Update dropdown selection in rack immediately
@@ -304,7 +306,7 @@ class SlotHandler:
                         ],
                     })
                     loop = asyncio.get_event_loop()
-                    ok   = await loop.run_in_executor(None, self._state.llama.start, match.full_path)
+                    ok   = await loop.run_in_executor(None, lambda: self._state.llama.start(match.full_path, self._state.draft_model))
                     await self._broadcast_update(ws)
                     if ok:
                         # Signal rack to reload WebView
@@ -375,7 +377,7 @@ class SlotHandler:
             })
 
             loop = asyncio.get_event_loop()
-            ok   = await loop.run_in_executor(None, self._state.llama.start, path)
+            ok   = await loop.run_in_executor(None, lambda: self._state.llama.start(path, self._state.draft_model))
 
             if ok:
                 log.info("llama-server started on port %d", self._state.cfg.server.port)
@@ -433,7 +435,7 @@ class SlotHandler:
             path = self._state.selected_path()
             if path:
                 await self._state._push_log_line(ws, "Restarting llama-server…")
-                ok2 = await loop.run_in_executor(None, self._state.llama.start, path)
+                ok2 = await loop.run_in_executor(None, lambda: self._state.llama.start(path, self._state.draft_model))
                 await self._broadcast_update(ws)
                 if ok2:
                     await self._send(ws, {"type": "reload_ui"})
@@ -446,7 +448,7 @@ class SlotHandler:
     async def _handle_list_local_models(self, ws: WebSocketServerProtocol) -> None:
         self._state.refresh_models()
         models = [
-            {"display_name": m.display_name, "full_path": m.full_path, "size_gb": m.size_gb}
+            {"display_name": m.display_name, "full_path": m.full_path, "size_gb": m.size_gb, "vocab_size": m.vocab_size}
             for m in self._state.models
         ]
         await self._send(ws, {
@@ -632,6 +634,17 @@ class SlotHandler:
 
     async def _handle_get_settings(self, ws: WebSocketServerProtocol) -> None:
         s = self._state.cfg.server
+        # Build draft model candidates — same vocab_size as current model, smaller
+        current = self._state.selected_model
+        draft_candidates = []
+        if current and current.vocab_size > 0:
+            draft_candidates = [
+                {"display_name": m.display_name, "full_path": m.full_path, "size_gb": m.size_gb}
+                for m in self._state.models
+                if m.full_path != current.full_path
+                and m.vocab_size == current.vocab_size
+                and m.size_gb < current.size_gb / 3
+            ]
         await self._send(ws, {
             "type": "action_result", "action": "settings",
             "data": {
@@ -649,6 +662,8 @@ class SlotHandler:
                     "flash_attn":     s.flash_attn,
                     "mlock":          s.mlock,
                 },
+                "draft_model":            self._state.draft_model,
+                "draft_model_candidates": draft_candidates,
             },
         })
 
@@ -672,6 +687,10 @@ class SlotHandler:
         for k, v in settings.items():
             if k in server_keys:
                 raw["server"][k] = v
+
+        # Save draft_model path in state (not in settings.json — it's runtime state)
+        if "draft_model" in settings:
+            self._state.draft_model = settings["draft_model"] or None
 
         settings_path.write_text(_json.dumps(raw, indent=2))
 
@@ -699,7 +718,7 @@ class SlotHandler:
             })
             await loop.run_in_executor(None, self._state.llama.stop)
             if path:
-                ok = await loop.run_in_executor(None, self._state.llama.start, path)
+                ok = await loop.run_in_executor(None, lambda: self._state.llama.start(path, self._state.draft_model))
                 await self._broadcast_update(ws)
                 if ok:
                     await self._send(ws, {"type": "reload_ui"})
