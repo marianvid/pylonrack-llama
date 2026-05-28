@@ -17,7 +17,7 @@ local_path: /Volumes/Marian_Backup/work/pylonrack-slots/llama/
 rack_protocol: PylonRack WebSocket protocol (see pylonrack/AGENTS.md)
 ws_port: 8765 (from rack.json, read at runtime)
 venv: .venv/ (auto-created by start.sh on first run)
-deps: websockets>=12.0, psutil>=5.9, requests>=2.31
+deps: websockets>=12.0, psutil>=5.9, requests>=2.31, huggingface_hub>=0.23
 ```
 
 ---
@@ -33,7 +33,7 @@ git_updater.py     — GitUpdater: git fetch/pull + cmake rebuild, progress call
 settings.json      — user config (gitignored)
 rack.json          — PylonRack slot manifest
 start.sh           — venv bootstrap + exec python3 server.py
-test.html          — static test page for WebView testing (not production)
+tests/             — pytest test suite
 ```
 
 ---
@@ -43,7 +43,7 @@ test.html          — static test page for WebView testing (not production)
 ### settings.json
 ```json
 {
-  "llama_bin":     "/path/to/llama-server",
+  "llama_bin":     "/path/to/llama.cpp/build/bin/llama-server",
   "llama_repo":    "/path/to/llama.cpp",
   "hf_cache":      "/path/to/HuggingFace/hub",
   "log_file":      "~/.pylonrack/llama-server.log",
@@ -61,38 +61,22 @@ test.html          — static test page for WebView testing (not production)
 }
 ```
 
-### AppConfig fields
-```
-llama_bin:    Path → bin_path property (expanduser)
-llama_repo:   Path → repo_path property
-hf_cache:     Path → hf_cache_path property
-log_file:     Path → log_path property
-openwebui_url: str → used as ui_url in manifest
-server:       ServerConfig dataclass
-```
-
-### ServerConfig defaults
-```
-host=0.0.0.0, port=1234, ctx_size=131072, n_gpu_layers=99
-parallel=2, threads=8, batch_size=512, ubatch_size=256
-```
-
 ---
 
 ## APPSTATE
 
 ```python
 class AppState:
-    cfg: AppConfig
-    llama: LlamaServer
-    updater: GitUpdater
-    models: list[GGUFModel]           # populated by refresh_models()
-    selected_model: GGUFModel | None  # first model by default
+    cfg:               AppConfig
+    llama:             LlamaServer
+    updater:           GitUpdater
+    models:            list[GGUFModel]
+    selected_model:    GGUFModel | None
     update_in_progress: bool
-    update_available: bool            # set by background check every 1800s
-
-    def refresh_models():             # scan cfg.hf_cache_path
-    def selected_path() -> str | None # shortcut to selected_model.full_path
+    update_available:  bool
+    binary_stale:      bool        # binary version < git commit count by >10
+    log_subscribers:   set         # WebSocket connections subscribed to live log
+    llama_version:     str         # "bNNNN" populated async after startup
 ```
 
 ---
@@ -109,12 +93,26 @@ class AppState:
   "controls": [
     {"id": "model_select",  "type": "dropdown", "label": "Model"},
     {"id": "toggle",        "type": "button",   "label": "Start",  "style": "primary"},
-    {"id": "update",        "type": "button",   "label": "Update", "style": "secondary", "badge": False},
     {"id": "status_label",  "type": "label",    "value": "Idle",   "style": "default"},
+    _update_control(state),   # see UPDATE_BUTTON_STATES below
   ],
-  "ui_url": cfg.openwebui_url   # loaded from settings.json
+  "ui_url": state.cfg.openwebui_url
 }
 ```
+
+### UPDATE_BUTTON_STATES (3 states)
+```python
+# binary_stale=True → red, badge=True
+{"id": "update", "label": "bNNNN", "style": "error",     "badge": True}
+# update_available=True → orange, badge=True
+{"id": "update", "label": "bNNNN", "style": "warning",   "badge": True}
+# default → grey, no badge
+{"id": "update", "label": "bNNNN", "style": "secondary", "badge": False}
+```
+Tooltip in rack (Swift):
+- error+badge   → "Binary is outdated — sources newer than binary. Click to rebuild."
+- warning+badge → "Update available — click to pull latest sources & rebuild"
+- default       → "llama.cpp is up to date"
 
 ### controls_update emitted by _controls_update(state)
 ```python
@@ -122,74 +120,114 @@ controls: [
   {"id": "model_select",  "value": selected_model.display_name or ""},
   {"id": "toggle",        "label": "Stop"|"Start", "style": "destructive"|"primary"},
   {"id": "status_label",  "value": _status_text(state), "style": _status_style(state)},
-  {"id": "update",        "badge": state.update_available},
+  {"id": "update",        "label": ..., "style": ..., "badge": ...},  # full _update_control(state)
 ]
 ```
-Status text/style logic:
-```
-update_in_progress → "Updating…" / "warning"
-llama.is_running   → "Running"   / "success"
-default            → "Idle"      / "default"
-```
 
-### pong emitted on ping
+### pong
 ```python
-{
-  "type": "pong",
-  "status": "running"|"warning",
-  "message": f"{ram_used} GB RAM · {reqs} req" if running else status_text
-}
+{"type": "pong", "status": "running"|"warning", "message": "X GB RAM · N req" | status_text}
+# "running" only when llama.is_running — rack shows WebView on "running", placeholder on "warning"
 ```
 
-### control_data handler (model_select only)
+### action: update (CRITICAL SEQUENCE)
 ```python
-# rack sends: {"type": "control_data", "control_id": "model_select"}
-# response: {"type": "control_data", "control_id": "model_select", "items": [display_names]}
+1. if update_in_progress: return
+2. was_running = llama.is_running
+3. if was_running: llama.stop()
+4. update_in_progress = True; binary_stale = False; update_available = False
+5. send {"type": "show_log"}          ← rack auto-switches to log panel
+6. log_subscribers.add(ws)            ← subscribe ws to live log
+7. broadcast_update()                 ← shows "Updating…" in controls
+8. run updater.update(on_line) in executor  ← each line → _push_log_line(ws, line) live
+9. update_in_progress = False
+10. if ok: llama_version = _get_llama_version(cfg); push "✓ Build complete — bNNNN"
+11. broadcast_update()
+12. if was_running and ok: llama.start(path); broadcast_update(); send reload_ui
 ```
 
-### action handlers
-
-**model_select:**
+### show_log (server → rack)
 ```python
-1. find GGUFModel by display_name
-2. state.selected_model = match
-3. was_running = llama.is_running
-4. send controls_update with model_select.value = display_name (immediate feedback)
-5. if was_running:
-   a. llama.stop()
-   b. send controls_update: toggle="Starting…"/secondary, status_label=f"Loading {name}…"/warning
-   c. ok = await executor(llama.start, match.full_path)
-   d. send _controls_update(state)
-   e. if ok: send {"type": "reload_ui"}  ← triggers WKWebView recreation in rack
-6. else: send _controls_update(state)
+{"type": "show_log"}
+# rack sets bodyMode = .log and calls requestLog()
+# used by update handler to auto-open log panel during build
 ```
 
-**toggle:**
+### log streaming (total=-1 = append)
 ```python
-if running: llama.stop(); broadcast_update
-else:
-  path = selected_path() or refresh + selected_path()
-  if no path: send error label, return
-  broadcast_update immediately (shows "Starting…" state via controls_update)
-  ok = await executor(llama.start, path)
-  if ok: log "started on port X"
-  broadcast_update
+{"type": "log_response", "lines": [line], "total": -1}
+# rack appends to logLines (does NOT replace)
+# used for: llama stdout piping, update build output
 ```
 
-**update:**
+---
+
+## GIT_UPDATER (CRITICAL)
+
+### cmake PATH issue
+```
+PROBLEM: start.sh launches server.py without sourcing .zshrc → cmake not on PATH
+FIX: use shutil.which("cmake") with fallback to absolute path
+```
 ```python
-if update_in_progress: return
-was_running = llama.is_running
-if was_running: llama.stop()
-state.update_in_progress = True
-broadcast_update
-lines = []
-ok = await executor(updater.update, lambda line: lines.append(line))
-state.update_in_progress = False
-state.update_available = False
-send log_response with lines (rack shows in log panel)
-broadcast_update
-if was_running and ok: restart with current model
+import shutil
+CMAKE = shutil.which("cmake") or "/opt/homebrew/bin/cmake"
+```
+
+### Build commands (per llama.cpp official docs)
+```
+# From: llama.cpp/docs/build.md — Metal Build section
+# Metal is enabled BY DEFAULT on macOS — do NOT add -DGGML_METAL=ON
+# Standard build:
+cmake -B build
+cmake --build build --config Release -j
+```
+WRONG: `cmake -B build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release`
+WRONG: `cmake --build build --target llama-server --clean-first`
+CORRECT:
+```python
+steps = [
+    (["git", "pull", "--ff-only"],                          "Pulling latest commits…"),
+    ([CMAKE, "-B", "build"],                                "Configuring CMake…"),
+    ([CMAKE, "--build", "build", "--config", "Release", "-j"], "Building…"),
+]
+```
+
+### is_binary_stale() — version comparison method
+```python
+# Compare binary version number vs git commit count
+# NOT mtime comparison (git resets timestamps on checkout)
+binary_version = parse from `llama-server --version` stderr: "version: NNNN"
+git_version    = `git rev-list --count HEAD`
+stale = binary_version - git_version < -10   # binary is >10 commits behind git
+# llama-server --version takes 10-15s (Metal init) — always run in executor
+```
+
+### has_update() — check remote
+```python
+# git fetch --quiet; git rev-list HEAD..origin/HEAD --count
+# True if count > 0
+```
+
+### Background check sequence
+```python
+_check_updates_periodically(state, handler):
+    while True:
+        version      = await executor(_get_llama_version)   # slow: 10-15s
+        has_update   = await executor(updater.has_update)
+        binary_stale = await executor(updater.is_binary_stale)
+        
+        changed = has_update != state.update_available or binary_stale != state.binary_stale
+        state.llama_version    = version
+        state.update_available = has_update
+        state.binary_stale     = binary_stale
+        
+        if changed:
+            # Send ONLY update button — prevents full controls re-render flicker
+            for ws in handler.clients:
+                ws.send(_update_control(state) wrapped in controls_update)
+        
+        await sleep(1800)
 ```
 
 ---
@@ -198,117 +236,47 @@ if was_running and ok: restart with current model
 
 ### PID detection (macOS — no root required)
 ```python
-def _find_pid():
-    result = subprocess.run(
-        ["lsof", "-iTCP:<port>", "-sTCP:LISTEN", "-t"],
-        capture_output=True, text=True, timeout=5
-    )
-    for line in result.stdout.strip().splitlines():
-        pid = int(line.strip())
-        if "llama" in psutil.Process(pid).name().lower():
-            return pid
-    return None
-```
-CRITICAL: psutil.net_connections() fails without root on macOS. Always use lsof.
-
-### is_running check
-```python
-@property
-def is_running(self):
-    if self._process and self._process.poll() is None: return True
-    return self._find_pid() is not None
-```
-Catches both: processes launched by this instance AND externally started instances on same port.
-
-### start() sequence
-```python
-1. if is_running: return True (idempotent)
-2. build command: llama-server + all params + --flash-attn on --reasoning off --metrics
-3. Popen(cmd, stdout=PIPE, stderr=STDOUT)
-4. start daemon thread: _pipe_log(proc.stdout) → rotating log file (1MB × 10)
-5. _wait_ready(): poll GET /v1/models every 2s up to READY_TIMEOUT=120s
-6. return True if ready, False if timeout or process died
+# CRITICAL: psutil.net_connections() fails without root on macOS → always use lsof
+result = subprocess.run(["lsof", "-iTCP:<port>", "-sTCP:LISTEN", "-t"], ...)
+for pid in result.stdout.splitlines():
+    if "llama" in psutil.Process(pid).name().lower(): return pid
 ```
 
-### stop() sequence
+### is_running
 ```python
-1. if self._process and running: proc.terminate(); proc.wait(timeout=5) or proc.kill()
-2. pid = _find_pid()  # also terminate externally started instance
-3. if pid: psutil.Process(pid).terminate()
-4. clear _process, _start_time, _model_path
+# Catches both: processes started by this instance AND externally started
+if self._process and self._process.poll() is None: return True
+return self._find_pid() is not None
 ```
 
-### Log rotation
+### stop() — waits for death (not fire-and-forget)
 ```python
-LOG_MAX_BYTES = 1MB, LOG_BACKUPS = 10
-# Rotates in _pipe_log: when file > MAX, rename .log→.log.1→.log.2 etc.
+proc.terminate(); proc.wait(timeout=5)  # wait — not fire-and-forget
+# Also terminate external pid via _find_pid()
+psutil.Process(ext_pid).terminate(); p.wait(timeout=5)  # wait here too
 ```
 
-### metrics()
+### Live log streaming
 ```python
-GET http://localhost:<port>/metrics  # Prometheus format
-extract: "llamacpp:requests_processing <float>"
-returns: {"requests_processing": int}
-```
-
-### ram()
-```python
-system: psutil.virtual_memory() → {used_gb, total_gb}
-llama: psutil.Process(pid).memory_info().rss → {used_gb}
+# llama stdout → _pipe_log thread → on_log_line callback → 
+# asyncio.run_coroutine_threadsafe → _push_log_line(ws, line) →
+# ws.send({"type": "log_response", "lines": [line], "total": -1})
 ```
 
 ---
 
-## MODEL_SCANNER
+## MODEL_MANAGER (server.py handlers)
 
-```python
-@dataclass(frozen=True)
-class GGUFModel:
-    display_name: str    # "org/repo / stem-without-repo-prefix"
-    full_path: str
-    size_gb: float
-
-def scan(hf_cache_path: Path) -> list[GGUFModel]:
-    # rglob("*.gguf") on hf_cache_path
-    # skip mmproj files (projection models, not main models)
-    # find ancestor dir starting with "models--"
-    # display_name: "org/repo / stem" (strip repo prefix from filename)
-    # sorted by path
 ```
-
-HF Cache structure: `hub/models--org--name/snapshots/<hash>/<file>.gguf`
-
----
-
-## GIT_UPDATER
-
-```python
-class GitUpdater:
-    def has_update() -> bool:
-        # git fetch --quiet; git rev-list HEAD..origin/HEAD --count
-        # returns True if count != "0" and != ""
-
-    def update(progress_callback) -> bool:
-        # steps: git pull --ff-only → cmake -B build -DGGML_METAL=ON → cmake --build build --config Release -j
-        # streams stdout to progress_callback(line)
-        # returns False on any non-zero returncode
+list_local_models → refresh_models(); return [{display_name, full_path, size_gb}]
+hf_search         → huggingface_hub.list_models(search=q, filter="gguf", sort="downloads", limit=50)
+                    WRONG: direction=-1 (not supported)
+                    Empty query → returns top downloaded models
+hf_model_files    → list_repo_files + get_paths_info; skip mmproj
+hf_download       → hf_hub_download(repo_id, filename, cache_dir)
+delete_model      → os.remove(path); refresh_models()
 ```
-Requires: cmake on PATH, git on PATH.
-Build target: Apple Silicon Metal (DGGML_METAL=ON).
-
----
-
-## BACKGROUND_TASKS
-
-```python
-_check_updates_periodically(state):
-    while True:
-        await sleep(1800)  # 30 minutes
-        if not update_in_progress and repo_path.exists():
-            has = await executor(updater.has_update)
-            state.update_available = has
-# Task created in main() via asyncio.create_task()
-```
+All return via `action_result` with `data: {type: "...", ...}` — rack routes via `actionResultToken`.
 
 ---
 
@@ -323,26 +291,29 @@ if [ ! -d ".venv" ]; then
 fi
 exec .venv/bin/python3 server.py
 ```
-CRITICAL: `exec` replaces shell — PYLON_PORT env propagates correctly to python3.
-First run: venv creation + pip install ≈ 15-30s. Use startup_delay in rack.json if needed.
-Subsequent runs: instant.
+- `exec` replaces shell — env vars propagate to python3
+- Does NOT source .zshrc → cmake, git must be found via absolute path or shutil.which
+- startup_delay in rack.json: 5s (server.py init is ~0.1s, but venv creation = 15-30s first run)
 
 ---
 
 ## KNOWN_ISSUES
 
 ```
-[RESOLVED] psutil.net_connections() → lsof based _find_pid()
-[RESOLVED] model_select did not update dropdown value in rack → controls_update with value field
-[RESOLVED] WebView showed stale model → reload_ui message after restart
-[RESOLVED] Orphan llama-server after stop → _find_pid() now finds and terminates external instances
-[ACTIVE] start.sh venv output goes to process log in rack (harmless, but visible on first run)
-[ACTIVE] llama.start() blocks executor thread for up to 120s — rack shows "Starting…" state but no progress bar
-[ACTIVE] update button rebuild takes minutes — no time estimate shown to user
-[ACTIVE] git_updater.update() uses --ff-only; merge commits in upstream will fail silently
-[ACTIVE] model_scanner does not filter by quantization — shows all quant variants
-[ACTIVE] No validation that llama_bin exists before start attempt
-[ACTIVE] openwebui_url hardcoded in settings.json — not auto-detected; llama.cpp serves UI on same port as API (default 1234)
+[RESOLVED] psutil.net_connections() → lsof
+[RESOLVED] model_select did not update dropdown → controls_update with value
+[RESOLVED] WebView stale model → reload_ui
+[RESOLVED] stop() fire-and-forget → wait for death
+[RESOLVED] cmake not on PATH → shutil.which + absolute fallback
+[RESOLVED] cmake wrong flags → follow llama.cpp docs (no -DGGML_METAL, no --target)
+[RESOLVED] update check after 30min delay → runs at startup
+[RESOLVED] flicker on update badge → send only update button, not full controls_update
+[RESOLVED] binary_stale via mtime → version number comparison instead
+[ACTIVE] llama.start() blocks up to 120s — no progress in rack during startup
+[ACTIVE] update build takes minutes — no ETA shown
+[ACTIVE] git pull --ff-only fails on merge commits in upstream
+[ACTIVE] No validation llama_bin exists before start
+[ACTIVE] hf_download progress: single 0% → 100% (no intermediate progress from hf_hub_download)
 ```
 
 ---
@@ -351,7 +322,14 @@ Subsequent runs: instant.
 
 ```
 2026-05-27 — Initial AGENTS.md
-  Captured: full protocol impl, AppState, LlamaServer internals, lsof fix,
-  model_select restart flow, reload_ui mechanism, start.sh venv pattern.
-  Known issues documented above.
+
+2026-05-28 — Major audit after debugging session
+  Added: cmake PATH fix (shutil.which), correct build commands per llama.cpp docs,
+  binary_stale 3-state update button, show_log protocol message,
+  log streaming (total=-1), background check sequence, model manager handlers,
+  anti-flicker controls_update (update button only), stop() wait semantics.
+  Test count: 37/37 passing (test_llama_server, test_model_scanner, test_model_manager,
+  test_server_state, test_webview_lifecycle, test_git_updater).
+  Confirmed working: full update sequence (git pull + cmake build, 395 log lines live).
+  Root cause of cmake failure: PATH not set when launched via start.sh without .zshrc.
 ```
