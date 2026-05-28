@@ -63,7 +63,7 @@ class AppState:
         self.update_available:   bool = False
         self.binary_stale:       bool = False
         self.log_subscribers: set = set()
-        self.llama_version:   str = _get_llama_version(self.cfg)
+        self.llama_version:   str = "llama"  # populated async after startup
 
         # Wire up live log push
         self.llama.on_log_line = self._on_log_line
@@ -594,28 +594,34 @@ class SlotHandler:
 # ---------------------------------------------------------------------------
 
 async def _check_updates_periodically(state: AppState, handler: "SlotHandler") -> None:
-    """Check for updates at startup then every 30 minutes. Push badge to rack."""
+    """Check version + updates at startup then every 30 minutes."""
     while True:
         if not state.update_in_progress and state.cfg.repo_path.exists():
-            # Check both: remote updates AND binary staleness
-            has_update   = await asyncio.get_event_loop().run_in_executor(
-                None, state.updater.has_update
-            )
-            binary_stale = await asyncio.get_event_loop().run_in_executor(
-                None, state.updater.is_binary_stale
-            )
-            changed = (has_update != state.update_available or
-                       binary_stale != state.binary_stale)
+            loop = asyncio.get_event_loop()
+
+            # Get version (slow due to Metal init — do it in background)
+            version = await loop.run_in_executor(None, lambda: _get_llama_version(state.cfg))
+            if version != state.llama_version:
+                state.llama_version = version
+
+            # Check updates and binary staleness
+            has_update   = await loop.run_in_executor(None, state.updater.has_update)
+            binary_stale = await loop.run_in_executor(None, state.updater.is_binary_stale)
+
+            changed = (has_update   != state.update_available or
+                       binary_stale != state.binary_stale     or
+                       version      != "llama")
             state.update_available = has_update
             state.binary_stale     = binary_stale
+
             if changed:
                 for ws in list(handler.clients):
                     try:
                         await ws.send(json.dumps(_controls_update(state)))
                     except Exception:
                         pass
-                log.info("Update check: has_update=%s binary_stale=%s",
-                         has_update, binary_stale)
+                log.info("Update check: version=%s has_update=%s binary_stale=%s",
+                         version, has_update, binary_stale)
         await asyncio.sleep(1800)
 
 

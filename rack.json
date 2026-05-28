@@ -2,7 +2,7 @@
   "name": "llama.cpp",
   "version": "1.0",
   "start": "zsh start.sh",
-  "startup_delay": 3,
+  "startup_delay": 5,
   "port": 8765,
   "heartbeat_interval": 5,
   "controls": [
