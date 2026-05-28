@@ -615,9 +615,14 @@ async def _check_updates_periodically(state: AppState, handler: "SlotHandler") -
             state.llama_version    = version
 
             if changed:
+                # Send only the update button — avoids re-rendering all controls (no flicker)
+                ctrl = _update_control(state)
                 for ws in list(handler.clients):
                     try:
-                        await ws.send(json.dumps(_controls_update(state)))
+                        await ws.send(json.dumps({
+                            "type":     "controls_update",
+                            "controls": [ctrl],
+                        }))
                     except Exception:
                         pass
                 log.info("Update check: version=%s has_update=%s binary_stale=%s",
