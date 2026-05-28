@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import subprocess
 import threading
 from pathlib import Path
@@ -644,7 +645,8 @@ async def _check_updates_periodically(state: AppState, handler: "SlotHandler") -
 async def main() -> None:
     rack_json = Path(__file__).parent / "rack.json"
     manifest  = json.loads(rack_json.read_text())
-    port      = manifest.get("port", 8765)
+    # PYLON_PORT env var overrides rack.json port (used by tests)
+    port = int(os.environ.get("PYLON_PORT", manifest.get("port", 8765)))
 
     state   = AppState()
     state.refresh_models()

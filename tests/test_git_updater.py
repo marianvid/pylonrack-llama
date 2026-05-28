@@ -119,19 +119,25 @@ class TestGitUpdaterLogic(unittest.TestCase):
         result = self.updater.has_update()
         self.assertIsInstance(result, bool)
 
-    def test_update_steps_include_clean_build(self):
-        """update() command sequence must include --clean-first to force rebuild."""
+    def test_update_steps_include_cmake_build(self):
+        """update() must use standard cmake commands per llama.cpp docs."""
         import inspect
         source = inspect.getsource(self.updater.update)
-        self.assertIn("--clean-first", source,
-            "cmake build must use --clean-first to force recompile after git pull")
+        # Per llama.cpp docs: cmake -B build && cmake --build build --config Release
+        self.assertIn("cmake", source.lower())
+        self.assertIn("-B", source, "cmake must configure with -B build")
+        self.assertIn("--build", source, "cmake must build with --build")
+        # --clean-first is NOT used (per llama.cpp docs, standard incremental build)
+        self.assertNotIn("--clean-first", source,
+            "cmake must NOT use --clean-first (not in llama.cpp official docs)")
 
     def test_update_steps_target_llama_server(self):
-        """update() must build specific target, not all targets."""
+        """update() builds all targets per llama.cpp docs (no --target restriction)."""
         import inspect
         source = inspect.getsource(self.updater.update)
-        self.assertIn("llama-server", source,
-            "cmake build must target llama-server specifically")
+        # Per llama.cpp docs: cmake --build build --config Release (no --target)
+        self.assertIn("--build", source)
+        self.assertIn("Release", source)
 
     def test_update_nonexistent_repo_returns_false(self):
         updater = GitUpdater(Path("/nonexistent/path"))
