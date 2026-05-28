@@ -9,6 +9,10 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
+import shutil
+
+CMAKE = shutil.which("cmake") or "/opt/homebrew/bin/cmake"
+
 class GitUpdater:
     """Checks and applies updates to a git repository, then rebuilds."""
 
@@ -83,9 +87,9 @@ class GitUpdater:
 
         steps = [
             (["git", "pull", "--ff-only"],                    "Pulling latest commits…"),
-            (["cmake", "-B", "build", "-DGGML_METAL=ON",
+            ([CMAKE, "-B", "build", "-DGGML_METAL=ON",
               "-DCMAKE_BUILD_TYPE=Release"],                   "Configuring CMake…"),
-            (["cmake", "--build", "build", "--config", "Release",
+            ([CMAKE, "--build", "build", "--config", "Release",
               "--target", "llama-server", "--clean-first", "-j"], "Building llama-server…"),
         ]
 
