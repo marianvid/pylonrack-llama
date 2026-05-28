@@ -163,21 +163,29 @@ class LlamaServer:
 
     def _build_command(self, model_path: str) -> list[str]:
         s = self._cfg.server
-        return [
+        cmd = [
             str(self._cfg.bin_path),
-            "--host",         s.host,
-            "--port",         str(s.port),
-            "-m",             model_path,
-            "--ctx-size",     str(s.ctx_size),
-            "--n-gpu-layers", str(s.n_gpu_layers),
-            "--parallel",     str(s.parallel),
-            "--threads",      str(s.threads),
-            "--batch-size",   str(s.batch_size),
-            "--ubatch-size",  str(s.ubatch_size),
-            "--flash-attn",   "on",
-            "--reasoning",    "off",
+            "--host",           s.host,
+            "--port",           str(s.port),
+            "-m",               model_path,
+            "--ctx-size",       str(s.ctx_size),
+            "--n-gpu-layers",   str(s.n_gpu_layers),
+            "--parallel",       str(s.parallel),
+            "--threads",        str(s.threads),
+            "--batch-size",     str(s.batch_size),
+            "--ubatch-size",    str(s.ubatch_size),
+            "--temp",           str(s.temperature),
+            "--top-p",          str(s.top_p),
+            "--top-k",          str(s.top_k),
+            "--repeat-penalty", str(s.repeat_penalty),
+            "--reasoning",      "off",
             "--metrics",
         ]
+        if s.flash_attn:
+            cmd += ["--flash-attn", "on"]
+        if s.mlock:
+            cmd.append("--mlock")
+        return cmd
 
     def _wait_ready(self) -> bool:
         url      = f"http://localhost:{self._cfg.server.port}/v1/models"

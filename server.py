@@ -334,6 +334,12 @@ class SlotHandler:
         elif control_id == "delete_model":
             await self._handle_delete_model(ws, value)
 
+        elif control_id == "get_settings":
+            await self._handle_get_settings(ws)
+
+        elif control_id == "save_settings":
+            await self._handle_save_settings(ws, msg.get("settings", {}))
+
     async def _handle_toggle(self, ws: WebSocketServerProtocol) -> None:
         if self._state.llama.is_running:
             # Send immediate feedback BEFORE blocking stop()
@@ -623,6 +629,82 @@ class SlotHandler:
                 "items": [m.display_name for m in self._state.models],
             })
 
+
+    async def _handle_get_settings(self, ws: WebSocketServerProtocol) -> None:
+        s = self._state.cfg.server
+        await self._send(ws, {
+            "type": "action_result", "action": "settings",
+            "data": {
+                "type": "settings",
+                "server": {
+                    "ctx_size":       s.ctx_size,
+                    "n_gpu_layers":   s.n_gpu_layers,
+                    "threads":        s.threads,
+                    "batch_size":     s.batch_size,
+                    "ubatch_size":    s.ubatch_size,
+                    "temperature":    s.temperature,
+                    "top_p":          s.top_p,
+                    "top_k":          s.top_k,
+                    "repeat_penalty": s.repeat_penalty,
+                    "flash_attn":     s.flash_attn,
+                    "mlock":          s.mlock,
+                },
+            },
+        })
+
+    async def _handle_save_settings(self, ws: WebSocketServerProtocol, settings: dict) -> None:
+        """Save settings to settings.json, reload config, restart server if running."""
+        import json as _json
+        from pathlib import Path as _Path
+
+        settings_path = _Path(__file__).parent / "settings.json"
+        raw = _json.loads(settings_path.read_text()) if settings_path.exists() else {}
+
+        # Map from Swift keys → settings.json server block
+        server_keys = {
+            "ctx_size", "n_gpu_layers", "parallel", "threads",
+            "batch_size", "ubatch_size",
+            "temperature", "top_p", "top_k", "repeat_penalty",
+            "flash_attn", "mlock",
+        }
+        if "server" not in raw:
+            raw["server"] = {}
+        for k, v in settings.items():
+            if k in server_keys:
+                raw["server"][k] = v
+
+        settings_path.write_text(_json.dumps(raw, indent=2))
+
+        # Reload config in-place
+        import config as cfg_module
+        self._state.cfg = cfg_module.load()
+        self._state.llama._cfg = self._state.cfg
+
+        was_running = self._state.llama.is_running
+
+        await self._send(ws, {
+            "type": "action_result", "action": "settings_saved",
+            "data": {"type": "settings_saved", "restarting": was_running},
+        })
+
+        if was_running:
+            loop = asyncio.get_event_loop()
+            path = self._state.selected_path()
+            await self._send(ws, {
+                "type": "controls_update",
+                "controls": [
+                    {"id": "toggle",       "label": "Restarting…", "style": "secondary"},
+                    {"id": "status_label", "value": "Restarting…", "style": "warning"},
+                ],
+            })
+            await loop.run_in_executor(None, self._state.llama.stop)
+            if path:
+                ok = await loop.run_in_executor(None, self._state.llama.start, path)
+                await self._broadcast_update(ws)
+                if ok:
+                    await self._send(ws, {"type": "reload_ui"})
+            else:
+                await self._broadcast_update(ws)
 
     async def _handle_delete_model(self, ws: WebSocketServerProtocol, path: str | None) -> None:
         if not path:
