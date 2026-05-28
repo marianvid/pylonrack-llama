@@ -526,42 +526,102 @@ class SlotHandler:
                 "data":   {"type": "download_progress", "progress": progress},
             })
 
-        def _download():
+        # Get download URL via huggingface_hub, then stream with requests for real progress
+        def _get_url():
             try:
-                from huggingface_hub import hf_hub_download
-                import os
-
-                dest_dir = self._state.cfg.hf_cache_path / f"models--{repo_id.replace('/', '--')}" / "snapshots" / "downloaded"
-                dest_dir.mkdir(parents=True, exist_ok=True)
-
-                # Use hf_hub_download with cache_dir
-                path = hf_hub_download(
-                    repo_id=repo_id,
-                    filename=filename,
-                    cache_dir=str(self._state.cfg.hf_cache_path),
-                    local_dir=None,
-                )
-                return path, None
+                from huggingface_hub import hf_hub_url
+                return hf_hub_url(repo_id=repo_id, filename=filename), None
             except Exception as e:
                 return None, str(e)
 
-        # Send progress updates while downloading
+        url, err = await loop.run_in_executor(None, _get_url)
+        if err:
+            await self._send(ws, {
+                "type": "action_result", "action": "download_error",
+                "data": {"type": "download_error", "message": err},
+            })
+            return
+
+        # Determine destination path inside HF cache structure
+        dest_dir = self._state.cfg.hf_cache_path / f"models--{repo_id.replace('/', '--')}" / "blobs"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = dest_dir / filename
+
+        # Stream download with progress updates sent back via WebSocket
+        progress_queue: asyncio.Queue = asyncio.Queue()
+
+        def _stream_download():
+            try:
+                import requests
+                headers = {}
+                hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+                if hf_token:
+                    headers["Authorization"] = f"Bearer {hf_token}"
+                resp = requests.get(url, headers=headers, stream=True, timeout=30)
+                resp.raise_for_status()
+                total = int(resp.headers.get("content-length", 0))
+                downloaded = 0
+                last_reported = -1
+                with open(dest_path, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total > 0:
+                                pct = downloaded / total
+                                # Report only on whole-percent changes to avoid flooding
+                                pct_int = int(pct * 100)
+                                if pct_int != last_reported:
+                                    last_reported = pct_int
+                                    asyncio.run_coroutine_threadsafe(
+                                        progress_queue.put(pct), loop
+                                )
+                asyncio.run_coroutine_threadsafe(progress_queue.put(None), loop)  # sentinel
+                return str(dest_path), None
+            except Exception as e:
+                asyncio.run_coroutine_threadsafe(progress_queue.put(None), loop)
+                return None, str(e)
+
         await send_progress(0.0)
-        path, error = await loop.run_in_executor(None, _download)
+
+        # Run download in executor, drain progress queue concurrently
+        download_future = loop.run_in_executor(None, _stream_download)
+
+        while True:
+            progress = await progress_queue.get()
+            if progress is None:
+                break
+            await send_progress(progress)
+
+        path, error = await download_future
 
         if error:
             await self._send(ws, {
-                "type":   "action_result",
-                "action": "download_error",
-                "data":   {"type": "download_error", "message": error},
+                "type": "action_result", "action": "download_error",
+                "data": {"type": "download_error", "message": error},
             })
         else:
             self._state.refresh_models()
+            # Send updated model list + dropdown items so new model is immediately selectable
+            models = [
+                {"display_name": m.display_name, "full_path": m.full_path, "size_gb": m.size_gb}
+                for m in self._state.models
+            ]
             await self._send(ws, {
-                "type":   "action_result",
-                "action": "download_complete",
-                "data":   {"type": "download_complete"},
+                "type": "action_result", "action": "download_complete",
+                "data": {"type": "download_complete"},
             })
+            await self._send(ws, {
+                "type":   "action_result", "action": "local_models",
+                "data":   {"type": "local_models", "models": models},
+            })
+            # Update dropdown items in controls bar
+            await self._send(ws, {
+                "type": "control_data",
+                "control_id": "model_select",
+                "items": [m.display_name for m in self._state.models],
+            })
+
 
     async def _handle_delete_model(self, ws: WebSocketServerProtocol, path: str | None) -> None:
         if not path:
