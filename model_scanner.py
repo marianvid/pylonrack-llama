@@ -45,6 +45,12 @@ def scan(hf_cache_path: Path) -> list[GGUFModel]:
         # Skip projection/vision models — not inference models
         if "mmproj" in gguf_file.name.lower():
             continue
+        # Skip incomplete downloads — HF cache uses .incomplete marker files
+        if (gguf_file.parent / (gguf_file.name + ".incomplete")).exists():
+            continue
+        # Skip files in tmp directories (in-progress downloads)
+        if any(p.name in ("tmp", "temp", "blobs.tmp") for p in gguf_file.parents):
+            continue
         repo_dir = gguf_file.parent
         for ancestor in gguf_file.parents:
             if ancestor.name.startswith("models--"):
