@@ -1,6 +1,6 @@
 # pylonrack-llama
 
-PylonRack slot application for **llama.cpp** — manages a `llama-server` process and exposes it to the rack with model selection, start/stop, update detection, metrics, and Open WebUI integration.
+PylonRack slot application for **llama.cpp** — manages a `llama-server` process and exposes it to the rack with model selection, start/stop, update detection, live build log, and llama.cpp built-in chat UI.
 
 ---
 
@@ -8,52 +8,63 @@ PylonRack slot application for **llama.cpp** — manages a `llama-server` proces
 
 - **Model dropdown** — scans your HuggingFace cache and lists all `.gguf` files
 - **Start / Stop** — launches and stops `llama-server` with your configured parameters
-- **Update button** — checks the llama.cpp git repo for new commits, rebuilds on demand; badge appears when an update is available
-- **Metrics** — RAM usage and active requests shown in the rack heartbeat
-- **Log** — llama-server stdout piped to a rotating log file, accessible via the rack log panel
-- **Open WebUI** — displayed in the rack body panel (runs separately, linked via `ui_url`)
+- **Update button** — shows current llama.cpp build version (e.g. `b9371`); orange badge when updates available, red badge when binary is outdated vs sources; click to pull + rebuild with live log output
+- **Metrics** — RAM usage and active requests shown in the status bar
+- **Log** — llama-server stdout streamed live to the rack log panel
+- **Chat UI** — llama.cpp built-in web UI displayed in the rack body panel (served directly by llama-server on the same port)
+- **Model Manager** — browse HuggingFace, download new models, delete existing ones
 
 ---
 
 ## Requirements
 
+- macOS 14+ (Apple Silicon recommended)
 - Python 3.11+
-- A working [llama.cpp](https://github.com/ggerganov/llama.cpp) build (`llama-server` binary)
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) — cloned and compiled (see below)
+- [cmake](https://cmake.org/) — required for update/rebuild: `brew install cmake`
+- [git](https://git-scm.com/) — for update detection
 - HuggingFace cache with `.gguf` model files
-- Open WebUI running separately (optional, for the body panel)
 - [PylonRack](https://github.com/marianvid/pylonrack) installed
+
+---
+
+## Building llama.cpp (required before first use)
+
+Follow the [official llama.cpp build instructions](https://github.com/ggerganov/llama.cpp/blob/master/docs/build.md). On macOS, Metal is enabled by default:
+
+```
+git clone https://github.com/ggerganov/llama.cpp
+cd llama.cpp
+cmake -B build
+cmake --build build --config Release -j
+```
+
+The compiled binary will be at `build/bin/llama-server`. Note this path — you'll need it in `settings.json`.
 
 ---
 
 ## Installation
 
-### 1. Clone
+### 1. Install cmake (if not already installed)
+
+```
+brew install cmake
+```
+
+### 2. Clone
 
 ```
 git clone https://github.com/marianvid/pylonrack-llama
 cd pylonrack-llama
 ```
 
-### 2. Install dependencies
-
-Using conda (recommended — same env as PylonRack tools):
-
-```
-conda activate pylonrack
-pip install -r requirements.txt
-```
-
-Or with any Python 3.11+ environment:
+### 3. Install dependencies
 
 ```
 pip install -r requirements.txt
 ```
 
-Dependencies: `websockets`, `psutil`, `requests`
-
-### 3. Configure
-
-Copy and edit `settings.json`:
+### 4. Configure `settings.json`
 
 ```json
 {
@@ -61,7 +72,7 @@ Copy and edit `settings.json`:
   "llama_repo":    "/path/to/llama.cpp",
   "hf_cache":      "/path/to/HuggingFace/hub",
   "log_file":      "~/.pylonrack/llama-server.log",
-  "openwebui_url": "http://localhost:8080",
+  "openwebui_url": "http://localhost:1234",
   "server": {
     "host":         "0.0.0.0",
     "port":         1234,
@@ -80,59 +91,18 @@ Copy and edit `settings.json`:
 | `llama_bin` | Absolute path to compiled `llama-server` binary |
 | `llama_repo` | Absolute path to the llama.cpp git repo (for update detection and rebuild) |
 | `hf_cache` | Absolute path to your HuggingFace hub cache directory |
-| `log_file` | Where llama-server stdout is written (rotating, 1MB × 10 files) |
-| `openwebui_url` | URL of your Open WebUI instance — displayed in the rack body panel |
-| `server.port` | Port llama-server listens on |
-| `server.ctx_size` | Context size in tokens |
-| `server.n_gpu_layers` | GPU layers offloaded to Metal |
-| `server.parallel` | Number of parallel slots |
-| `server.threads` | CPU threads |
-| `server.batch_size` / `ubatch_size` | Batch sizes |
+| `openwebui_url` | URL of the llama.cpp built-in UI — same port as `server.port` (default `http://localhost:1234`) |
+| `server.port` | Port llama-server listens on — also where the chat UI is served |
 
 `settings.json` is gitignored — your paths stay local.
-
-### 4. Update `rack.json` start command
-
-Edit `rack.json` to use your Python interpreter:
-
-```json
-{
-  "start": "/path/to/your/python3 server.py"
-}
-```
-
-For conda:
-```json
-{
-  "start": "conda run -n pylonrack python3 server.py"
-}
-```
-
-Or create a `start.sh`:
-```bash
-#!/bin/bash
-source ~/.bashrc
-conda activate pylonrack
-python3 server.py
-```
-
-```json
-{
-  "start": "bash start.sh"
-}
-```
 
 ---
 
 ## Adding to PylonRack
 
 1. Open PylonRack (menu bar icon)
-2. Click `+` in the slot list
-3. Click **Browse…** and select this folder (`pylonrack-llama/`)
-4. Click **Add**
-5. Press **▶** to activate the slot
-
-The slot starts `python3 server.py`, which starts the WebSocket server. Select a model from the dropdown and press **Start** to launch llama-server.
+2. Click `+` and select this folder
+3. Press ▶ to activate
 
 ---
 
@@ -140,20 +110,26 @@ The slot starts `python3 server.py`, which starts the WebSocket server. Select a
 
 | Control | Type | Description |
 |---------|------|-------------|
-| Model | Dropdown | Select from all `.gguf` files in HF cache |
+| Model dropdown | Dropdown | Select from all `.gguf` files in HF cache |
 | Start / Stop | Button | Toggle llama-server |
-| Update | Button | `git pull` + cmake rebuild; badge = update available |
-| Status | Label | Current state: Idle / Running / Updating… |
+| bNNNN | Button | llama.cpp build version; badge = update available or binary outdated |
+| Status | Label | Idle / Starting… / Running / Stopping… / Updating… |
+| 📄 | Toggle | Show/hide process log |
+| ⊞ | Toggle | Show/hide model manager |
 
 ---
 
 ## Update mechanism
 
-- Every 30 minutes, the slot runs `git fetch` against the llama.cpp repo
-- If new commits are available, the **Update** button gets an orange badge
-- Pressing **Update**: stops llama-server (if running), runs `git pull` + `cmake --build`, then optionally restarts
-- Rebuild output streams to the rack log panel in real time
-- Requires `cmake` on `PATH`
+- At startup and every 30 minutes, checks for new commits and binary staleness
+- **Orange badge** — new commits available on origin
+- **Red badge** — binary version is behind git commit count (needs rebuild)
+- Click the version button to: stop llama-server → `git pull` → `cmake -B build` → `cmake --build build --config Release -j` → restart
+- Full build output streams live to the log panel
+- After successful build, version label updates automatically
+
+### cmake PATH requirement
+`cmake` must be installed and findable. The slot uses `shutil.which("cmake")` with fallback to `/opt/homebrew/bin/cmake`. If cmake is not found: `brew install cmake`.
 
 ---
 
@@ -163,12 +139,14 @@ The slot starts `python3 server.py`, which starts the WebSocket server. Select a
 pylonrack-llama/
 ├── rack.json           ← PylonRack slot manifest
 ├── settings.json       ← local configuration (gitignored)
+├── start.sh            ← venv bootstrap + launch
 ├── server.py           ← WebSocket server (PylonRack protocol)
-├── config.py           ← configuration loader with defaults
+├── config.py           ← configuration loader
 ├── llama_server.py     ← llama-server process lifecycle
 ├── model_scanner.py    ← HF cache scanner
 ├── git_updater.py      ← git fetch/pull + cmake rebuild
-└── requirements.txt
+├── requirements.txt
+└── tests/              ← pytest test suite
 ```
 
 ---
