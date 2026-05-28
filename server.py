@@ -322,13 +322,14 @@ class SlotHandler:
             await self._handle_list_local_models(ws)
 
         elif control_id == "hf_search":
-            await self._handle_hf_search(ws, value)
+            asyncio.create_task(self._handle_hf_search(ws, value))
 
         elif control_id == "hf_model_files":
-            await self._handle_hf_model_files(ws, value)
+            asyncio.create_task(self._handle_hf_model_files(ws, value))
 
         elif control_id == "hf_download":
-            await self._handle_hf_download(ws, value)
+            # Fire as background task — don't await, so ping/pong continues during download
+            asyncio.create_task(self._handle_hf_download(ws, value))
 
         elif control_id == "delete_model":
             await self._handle_delete_model(ws, value)
