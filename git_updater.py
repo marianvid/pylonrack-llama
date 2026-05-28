@@ -86,11 +86,12 @@ class GitUpdater:
             return False
 
         steps = [
-            (["git", "pull", "--ff-only"],                    "Pulling latest commits…"),
-            ([CMAKE, "-B", "build", "-DGGML_METAL=ON",
-              "-DCMAKE_BUILD_TYPE=Release"],                   "Configuring CMake…"),
-            ([CMAKE, "--build", "build", "--config", "Release",
-              "--target", "llama-server", "--clean-first", "-j"], "Building llama-server…"),
+            (["git", "pull", "--ff-only"],
+             "Pulling latest commits…"),
+            ([CMAKE, "-B", "build"],
+             "Configuring CMake…"),
+            ([CMAKE, "--build", "build", "--config", "Release", "-j"],
+             "Building…"),
         ]
 
         for cmd, label in steps:
