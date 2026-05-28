@@ -609,10 +609,10 @@ async def _check_updates_periodically(state: AppState, handler: "SlotHandler") -
             binary_stale = await loop.run_in_executor(None, state.updater.is_binary_stale)
 
             changed = (has_update   != state.update_available or
-                       binary_stale != state.binary_stale     or
-                       version      != "llama")
+                       binary_stale != state.binary_stale)
             state.update_available = has_update
             state.binary_stale     = binary_stale
+            state.llama_version    = version
 
             if changed:
                 for ws in list(handler.clients):
