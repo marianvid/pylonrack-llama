@@ -32,7 +32,7 @@ def _get_llama_version(cfg) -> str:
     try:
         result = subprocess.run(
             [str(cfg.bin_path), "--version"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=15
         )
         m = re.search(r"version:\s*(\d+)", result.stderr)
         return f"b{m.group(1)}" if m else "llama"
@@ -379,49 +379,56 @@ class SlotHandler:
         if self._state.update_in_progress:
             return
 
+        # Stop llama if running
         was_running = self._state.llama.is_running
         if was_running:
             self._state.llama.stop()
 
         self._state.update_in_progress = True
-        # Subscribe ws to log stream so update output appears live in log panel
-        self._state.log_subscribers.add(ws)
-        await self._broadcast_update(ws)
+        self._state.binary_stale       = False
+        self._state.update_available   = False
 
-        # Switch rack to log panel automatically
+        # Tell rack to open log panel
         await self._send(ws, {"type": "show_log"})
+
+        # Subscribe this connection to live log
+        self._state.log_subscribers.add(ws)
+
+        # Show "Updating…" in controls immediately
+        await self._broadcast_update(ws)
 
         loop = asyncio.get_event_loop()
 
         def _run_update():
             def on_line(line: str):
-                # Push each line live to log subscribers
-                for sub in list(self._state.log_subscribers):
-                    try:
-                        asyncio.run_coroutine_threadsafe(
-                            self._state._push_log_line(sub, line), loop
-                        )
-                    except Exception:
-                        pass
+                asyncio.run_coroutine_threadsafe(
+                    self._state._push_log_line(ws, line), loop
+                )
             return self._state.updater.update(on_line)
 
         ok = await loop.run_in_executor(None, _run_update)
-
         self._state.update_in_progress = False
-        self._state.update_available   = False
 
-        # Refresh version label after successful build
+        # Refresh version in background (slow)
         if ok:
-            self._state.llama_version = _get_llama_version(self._state.cfg)
+            new_version = await loop.run_in_executor(
+                None, lambda: _get_llama_version(self._state.cfg)
+            )
+            self._state.llama_version = new_version
+            self._state.binary_stale  = False
+            await self._state._push_log_line(ws, f"✓ Build complete — {new_version}")
 
         await self._broadcast_update(ws)
 
+        # Restart if was running
         if was_running and ok:
             path = self._state.selected_path()
             if path:
+                await self._state._push_log_line(ws, "Restarting llama-server…")
                 ok2 = await loop.run_in_executor(None, self._state.llama.start, path)
+                await self._broadcast_update(ws)
                 if ok2:
-                    await self._broadcast_update(ws)
+                    await self._send(ws, {"type": "reload_ui"})
 
     async def _broadcast_update(self, ws: WebSocketServerProtocol) -> None:
         await self._send(ws, _controls_update(self._state))
