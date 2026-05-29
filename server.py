@@ -448,7 +448,7 @@ class SlotHandler:
     async def _handle_list_local_models(self, ws: WebSocketServerProtocol) -> None:
         self._state.refresh_models()
         models = [
-            {"display_name": m.display_name, "full_path": m.full_path, "size_gb": m.size_gb, "vocab_size": m.vocab_size}
+            {"display_name": m.display_name, "full_path": m.full_path, "size_gb": m.size_gb}
             for m in self._state.models
         ]
         await self._send(ws, {
@@ -634,17 +634,6 @@ class SlotHandler:
 
     async def _handle_get_settings(self, ws: WebSocketServerProtocol) -> None:
         s = self._state.cfg.server
-        # Build draft model candidates — same vocab_size as current model, smaller
-        current = self._state.selected_model
-        draft_candidates = []
-        if current and current.vocab_size > 0:
-            draft_candidates = [
-                {"display_name": m.display_name, "full_path": m.full_path, "size_gb": m.size_gb}
-                for m in self._state.models
-                if m.full_path != current.full_path
-                and m.vocab_size == current.vocab_size
-                and m.size_gb < current.size_gb / 3
-            ]
         await self._send(ws, {
             "type": "action_result", "action": "settings",
             "data": {
@@ -662,8 +651,8 @@ class SlotHandler:
                     "flash_attn":     s.flash_attn,
                     "mlock":          s.mlock,
                 },
-                "draft_model":            self._state.draft_model,
-                "draft_model_candidates": draft_candidates,
+                "draft_model": self._state.draft_model,
+                "hf_cache":    str(self._state.cfg.hf_cache_path),
             },
         })
 
