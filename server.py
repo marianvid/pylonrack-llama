@@ -129,6 +129,7 @@ class AppState:
         _raw = _json.loads(_s.read_text()) if _s.exists() else {}
         self.draft_model: str | None = _raw.get("draft_model") or None
         self._saved_model_path: str | None = _raw.get("selected_model") or None
+        self._draft_map: dict = _raw.get("draft_map", {})  # {model_path: draft_path}
         self.update_available:   bool = False
         self.binary_stale:       bool = False
         self.log_subscribers: set = set()
@@ -350,13 +351,14 @@ class SlotHandler:
             match = next((m for m in self._state.models if m.display_name == value), None)
             if match:
                 self._state.selected_model = match
-                self._state.draft_model = None  # reset draft — may be incompatible with new model
+                # Restore draft associated with this model (if any)
+                self._state.draft_model = self._state._draft_map.get(match.full_path)
                 # Persist selection
                 import json as _j; from pathlib import Path as _P
                 _sp = _P(__file__).parent / "settings.json"
                 _r = _j.loads(_sp.read_text()) if _sp.exists() else {}
                 _r["selected_model"] = match.full_path
-                _r["draft_model"] = None
+                _r["draft_model"] = self._state.draft_model
                 _sp.write_text(_j.dumps(_r, indent=2))
                 was_running = self._state.llama.is_running
 
@@ -791,6 +793,15 @@ class SlotHandler:
             draft = settings["draft_model"] or None
             self._state.draft_model = draft
             raw["draft_model"] = draft
+            # Update draft_map for current model
+            if self._state.selected_model:
+                if "draft_map" not in raw:
+                    raw["draft_map"] = {}
+                if draft:
+                    raw["draft_map"][self._state.selected_model.full_path] = draft
+                else:
+                    raw["draft_map"].pop(self._state.selected_model.full_path, None)
+                self._state._draft_map = raw["draft_map"]
 
         settings_path.write_text(_json.dumps(raw, indent=2))
 
