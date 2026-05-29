@@ -762,7 +762,7 @@ class SlotHandler:
                     "flash_attn":     s.flash_attn,
                     "mlock":          s.mlock,
                 },
-                "draft_model": self._state.draft_model,
+                "draft_model": self._state._draft_map.get(self._state.selected_model.full_path) if self._state.selected_model else self._state.draft_model,
                 "hf_cache":    str(self._state.cfg.hf_cache_path),
             },
         })
