@@ -186,7 +186,7 @@ class LlamaServer:
         if s.mlock:
             cmd.append("--mlock")
         if draft_model_path:
-            cmd += ["--draft-model", draft_model_path]
+            cmd += ["-md", draft_model_path]
         return cmd
 
     def _wait_ready(self) -> bool:
