@@ -122,12 +122,13 @@ class AppState:
         self.models:    list[GGUFModel] = []
         self.selected_model: GGUFModel | None = None
         self.update_in_progress: bool = False
-        # Load draft_model from settings.json for persistence across restarts
+        # Load draft_model and selected_model from settings.json for persistence
         import json as _json
         from pathlib import Path as _Path
         _s = _Path(__file__).parent / "settings.json"
         _raw = _json.loads(_s.read_text()) if _s.exists() else {}
         self.draft_model: str | None = _raw.get("draft_model") or None
+        self._saved_model_path: str | None = _raw.get("selected_model") or None
         self.update_available:   bool = False
         self.binary_stale:       bool = False
         self.log_subscribers: set = set()
@@ -149,7 +150,13 @@ class AppState:
     def refresh_models(self) -> None:
         self.models = scan(self.cfg.hf_cache_path)
         if self.models and self.selected_model is None:
-            self.selected_model = self.models[0]
+            # Restore previously selected model if available
+            saved = getattr(self, "_saved_model_path", None)
+            if saved:
+                match = next((m for m in self.models if m.full_path == saved), None)
+                self.selected_model = match or self.models[0]
+            else:
+                self.selected_model = self.models[0]
 
     def selected_path(self) -> str | None:
         return self.selected_model.full_path if self.selected_model else None
@@ -344,6 +351,13 @@ class SlotHandler:
             if match:
                 self._state.selected_model = match
                 self._state.draft_model = None  # reset draft — may be incompatible with new model
+                # Persist selection
+                import json as _j; from pathlib import Path as _P
+                _sp = _P(__file__).parent / "settings.json"
+                _r = _j.loads(_sp.read_text()) if _sp.exists() else {}
+                _r["selected_model"] = match.full_path
+                _r["draft_model"] = None
+                _sp.write_text(_j.dumps(_r, indent=2))
                 was_running = self._state.llama.is_running
 
                 # Update dropdown selection in rack immediately
@@ -792,24 +806,26 @@ class SlotHandler:
             "data": {"type": "settings_saved", "restarting": was_running},
         })
 
-        if was_running:
+        path = self._state.selected_path()
+        if path:
             loop = asyncio.get_event_loop()
-            path = self._state.selected_path()
             await self._send(ws, {
                 "type": "controls_update",
                 "controls": [
-                    {"id": "toggle",       "label": "Restarting…", "style": "secondary"},
-                    {"id": "status_label", "value": "Restarting…", "style": "warning"},
+                    {"id": "toggle",       "label": "Starting…", "style": "secondary"},
+                    {"id": "status_label", "value": "Starting…", "style": "warning"},
                 ],
             })
-            await loop.run_in_executor(None, self._state.llama.stop)
-            if path:
-                ok = await loop.run_in_executor(None, lambda: self._state.llama.start(path, self._state.draft_model))
-                await self._broadcast_update(ws)
-                if ok:
-                    await self._send(ws, {"type": "reload_ui"})
+            if was_running:
+                await loop.run_in_executor(None, self._state.llama.stop)
+            ok = await loop.run_in_executor(None, lambda: self._state.llama.start(path, self._state.draft_model))
+            await self._broadcast_update(ws)
+            if ok:
+                await self._send(ws, {"type": "reload_ui"})
             else:
-                await self._broadcast_update(ws)
+                await self._send(ws, {"type": "show_log"})
+        else:
+            await self._broadcast_update(ws)
 
     async def _handle_delete_model(self, ws: WebSocketServerProtocol, path: str | None) -> None:
         if not path:
