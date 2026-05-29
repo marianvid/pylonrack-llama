@@ -41,6 +41,33 @@ def _get_llama_version(cfg) -> str:
         return "llama"
 
 
+def _read_model_defaults(path: str, base: "ServerConfig") -> dict:
+    """Read recommended settings from GGUF metadata + ServerConfig defaults."""
+    defaults = {
+        "ctx_size":       base.ctx_size,
+        "n_gpu_layers":   base.n_gpu_layers,
+        "threads":        base.threads,
+        "batch_size":     base.batch_size,
+        "ubatch_size":    base.ubatch_size,
+        "temperature":    base.temperature,
+        "top_p":          base.top_p,
+        "top_k":          base.top_k,
+        "repeat_penalty": base.repeat_penalty,
+        "flash_attn":     base.flash_attn,
+        "mlock":          base.mlock,
+    }
+    try:
+        import gguf
+        r = gguf.GGUFReader(str(path), "r")
+        ctx = r.fields.get("llama.context_length") or               r.fields.get("qwen2.context_length") or               r.fields.get("gemma.context_length") or               r.fields.get("gemma4.context_length")
+        if ctx:
+            val = int(ctx.parts[-1].tolist()[0])
+            defaults["ctx_size"] = val
+    except Exception:
+        pass
+    return defaults
+
+
 def _tail_log_file(log_path: Path, n: int = 100, skip: int = 0) -> list[str]:
     """Read n lines from log file ending before the last `skip` lines.
     skip=0 → last n lines; skip=100 → lines before the last 100, etc.
@@ -129,7 +156,8 @@ class AppState:
         _raw = _json.loads(_s.read_text()) if _s.exists() else {}
         self.draft_model: str | None = _raw.get("draft_model") or None
         self._saved_model_path: str | None = _raw.get("selected_model") or None
-        self._draft_map: dict = _raw.get("draft_map", {})  # {model_path: draft_path}
+        self._draft_map:    dict = _raw.get("draft_map",    {})  # {model_path: draft_path}
+        self._settings_map: dict = _raw.get("settings_map", {})  # {model_path: {ctx_size, temp, ...}}
         self.update_available:   bool = False
         self.binary_stale:       bool = False
         self.log_subscribers: set = set()
@@ -351,15 +379,15 @@ class SlotHandler:
             match = next((m for m in self._state.models if m.display_name == value), None)
             if match:
                 self._state.selected_model = match
-                # Restore draft associated with this model (if any)
                 self._state.draft_model = self._state._draft_map.get(match.full_path)
-                # Persist selection
                 import json as _j; from pathlib import Path as _P
                 _sp = _P(__file__).parent / "settings.json"
                 _r = _j.loads(_sp.read_text()) if _sp.exists() else {}
                 _r["selected_model"] = match.full_path
                 _r["draft_model"] = self._state.draft_model
                 _sp.write_text(_j.dumps(_r, indent=2))
+                # Push updated settings to client immediately
+                asyncio.create_task(self._handle_get_settings(ws))
                 was_running = self._state.llama.is_running
 
                 # Update dropdown selection in rack immediately
@@ -744,25 +772,19 @@ class SlotHandler:
             })
 
     async def _handle_get_settings(self, ws: WebSocketServerProtocol) -> None:
-        s = self._state.cfg.server
+        current    = self._state.selected_model
+        model_path = current.full_path if current else None
+        if model_path and model_path in self._state._settings_map:
+            s_dict = self._state._settings_map[model_path]
+        else:
+            s_dict = _read_model_defaults(model_path, self._state.cfg.server) if model_path else {}
+        draft = self._state._draft_map.get(model_path) if model_path else None
         await self._send(ws, {
             "type": "action_result", "action": "settings",
             "data": {
-                "type": "settings",
-                "server": {
-                    "ctx_size":       s.ctx_size,
-                    "n_gpu_layers":   s.n_gpu_layers,
-                    "threads":        s.threads,
-                    "batch_size":     s.batch_size,
-                    "ubatch_size":    s.ubatch_size,
-                    "temperature":    s.temperature,
-                    "top_p":          s.top_p,
-                    "top_k":          s.top_k,
-                    "repeat_penalty": s.repeat_penalty,
-                    "flash_attn":     s.flash_attn,
-                    "mlock":          s.mlock,
-                },
-                "draft_model": self._state._draft_map.get(self._state.selected_model.full_path) if self._state.selected_model else self._state.draft_model,
+                "type":        "settings",
+                "server":      s_dict,
+                "draft_model": draft,
                 "hf_cache":    str(self._state.cfg.hf_cache_path),
             },
         })
@@ -802,6 +824,14 @@ class SlotHandler:
                 else:
                     raw["draft_map"].pop(self._state.selected_model.full_path, None)
                 self._state._draft_map = raw["draft_map"]
+
+        # Save settings per model in settings_map
+        if self._state.selected_model:
+            if "settings_map" not in raw:
+                raw["settings_map"] = {}
+            model_settings = {k: v for k, v in settings.items() if k != "draft_model"}
+            raw["settings_map"][self._state.selected_model.full_path] = model_settings
+            self._state._settings_map[self._state.selected_model.full_path] = model_settings
 
         settings_path.write_text(_json.dumps(raw, indent=2))
 
