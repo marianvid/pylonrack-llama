@@ -122,7 +122,12 @@ class AppState:
         self.models:    list[GGUFModel] = []
         self.selected_model: GGUFModel | None = None
         self.update_in_progress: bool = False
-        self.draft_model: str | None = None  # full_path of draft model, None = disabled
+        # Load draft_model from settings.json for persistence across restarts
+        import json as _json
+        from pathlib import Path as _Path
+        _s = _Path(__file__).parent / "settings.json"
+        _raw = _json.loads(_s.read_text()) if _s.exists() else {}
+        self.draft_model: str | None = _raw.get("draft_model") or None
         self.update_available:   bool = False
         self.binary_stale:       bool = False
         self.log_subscribers: set = set()
@@ -767,9 +772,11 @@ class SlotHandler:
             if k in server_keys:
                 raw["server"][k] = v
 
-        # Save draft_model path in state (not in settings.json — it's runtime state)
+        # Save draft_model in both state and settings.json for persistence across restarts
         if "draft_model" in settings:
-            self._state.draft_model = settings["draft_model"] or None
+            draft = settings["draft_model"] or None
+            self._state.draft_model = draft
+            raw["draft_model"] = draft
 
         settings_path.write_text(_json.dumps(raw, indent=2))
 
