@@ -339,6 +339,9 @@ class SlotHandler:
         elif control_id == "get_settings":
             await self._handle_get_settings(ws)
 
+        elif control_id == "check_draft_compat":
+            asyncio.create_task(self._handle_check_draft_compat(ws, value))
+
         elif control_id == "save_settings":
             await self._handle_save_settings(ws, msg.get("settings", {}))
 
@@ -631,6 +634,41 @@ class SlotHandler:
                 "items": [m.display_name for m in self._state.models],
             })
 
+
+    async def _handle_check_draft_compat(self, ws: WebSocketServerProtocol, draft_path: str | None) -> None:
+        """Read vocab_size from current + draft model and compare."""
+        if not draft_path or not self._state.selected_model:
+            return
+        loop = asyncio.get_event_loop()
+
+        def _read_two():
+            try:
+                import gguf
+                def vocab(path):
+                    r = gguf.GGUFReader(str(path), 'r')
+                    t = r.fields.get("tokenizer.ggml.tokens")
+                    return len(t.data) if t else 0
+                main_v  = vocab(self._state.selected_model.full_path)
+                draft_v = vocab(draft_path)
+                return main_v, draft_v, None
+            except Exception as e:
+                return 0, 0, str(e)
+
+        main_v, draft_v, err = await loop.run_in_executor(None, _read_two)
+        if err:
+            await self._send(ws, {
+                "type": "action_result", "action": "draft_compat",
+                "data": {"type": "draft_compat", "compatible": False,
+                         "main_vocab": 0, "draft_vocab": 0},
+            })
+        else:
+            await self._send(ws, {
+                "type": "action_result", "action": "draft_compat",
+                "data": {"type": "draft_compat",
+                         "compatible":  main_v == draft_v and main_v > 0,
+                         "main_vocab":  main_v,
+                         "draft_vocab": draft_v},
+            })
 
     async def _handle_get_settings(self, ws: WebSocketServerProtocol) -> None:
         s = self._state.cfg.server
