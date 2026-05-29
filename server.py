@@ -41,6 +41,62 @@ def _get_llama_version(cfg) -> str:
         return "llama"
 
 
+def _tail_log_file(log_path: Path, n: int = 100) -> list[str]:
+    """Read last n lines from log file. Returns [] if file doesn't exist."""
+    try:
+        if not log_path.exists():
+            return []
+        with open(log_path, "rb") as f:
+            # Efficient tail: seek from end
+            f.seek(0, 2)
+            size = f.tell()
+            block = min(size, n * 200)  # estimate ~200 bytes per line
+            f.seek(max(0, size - block))
+            lines = f.read().decode("utf-8", errors="replace").splitlines()
+            return lines[-n:]
+    except Exception:
+        return []
+
+
+async def _watch_log_file(state: AppState, handler: "SlotHandler") -> None:
+    """Watch log file for new lines and push to all log subscribers."""
+    log_path = state.cfg.log_path
+    # Wait for file to exist
+    while not log_path.exists():
+        await asyncio.sleep(1)
+
+    # Start from end of file
+    with open(log_path, "rb") as f:
+        f.seek(0, 2)
+        pos = f.tell()
+
+    while True:
+        await asyncio.sleep(0.2)
+        try:
+            current_size = log_path.stat().st_size
+            if current_size < pos:
+                # File was rotated/truncated
+                pos = 0
+            if current_size > pos:
+                with open(log_path, "rb") as f:
+                    f.seek(pos)
+                    new_data = f.read()
+                    pos = f.tell()
+                new_lines = new_data.decode("utf-8", errors="replace").splitlines()
+                if new_lines and state.log_subscribers:
+                    for ws in list(state.log_subscribers):
+                        try:
+                            await ws.send(json.dumps({
+                                "type":  "log_response",
+                                "lines": new_lines,
+                                "total": -1,
+                            }))
+                        except Exception:
+                            state.log_subscribers.discard(ws)
+        except Exception:
+            pass
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -67,29 +123,15 @@ class AppState:
         self.log_subscribers: set = set()
         self.llama_version:   str = "llama"  # populated async after startup
 
-        # Wire up live log push
-        self.llama.on_log_line = self._on_log_line
-
-    def _on_log_line(self, line: str) -> None:
-        """Called from log thread — schedule push to all subscribers."""
-        import asyncio
-        for ws in list(self.log_subscribers):
-            try:
-                loop = asyncio.get_event_loop()
-                asyncio.run_coroutine_threadsafe(
-                    self._push_log_line(ws, line), loop
-                )
-            except Exception:
-                pass
-
     @staticmethod
     async def _push_log_line(ws, line: str) -> None:
+        """Push a single log line to a subscriber (used by update handler)."""
         try:
             import json
             await ws.send(json.dumps({
                 "type":  "log_response",
                 "lines": [line],
-                "total": -1,   # -1 = streaming append (not a full fetch)
+                "total": -1,
             }))
         except Exception:
             pass
@@ -258,9 +300,9 @@ class SlotHandler:
         elif msg_type == "log_request":
             # Subscribe to live log stream
             self._state.log_subscribers.add(ws)
-            # Send existing tail immediately
-            n     = msg.get("lines", 50)
-            lines = self._state.llama.log_tail(n)
+            # Send existing tail from file immediately
+            n     = msg.get("lines", 100)
+            lines = _tail_log_file(self._state.cfg.log_file_path, n)
             await self._send(ws, {"type": "log_response", "lines": lines, "total": len(lines)})
 
         elif msg_type == "shutdown":
@@ -842,6 +884,7 @@ async def main() -> None:
 
     handler = SlotHandler(state)
     asyncio.create_task(_check_updates_periodically(state, handler))
+    asyncio.create_task(_watch_log_file(state, handler))
     log.info("PylonRack llama.cpp slot starting on ws://localhost:%d", port)
 
     async with websockets.serve(handler.handle, "localhost", port):
