@@ -41,19 +41,24 @@ def _get_llama_version(cfg) -> str:
         return "llama"
 
 
-def _tail_log_file(log_path: Path, n: int = 100) -> list[str]:
-    """Read last n lines from log file. Returns [] if file doesn't exist."""
+def _tail_log_file(log_path: Path, n: int = 100, skip: int = 0) -> list[str]:
+    """Read n lines from log file ending before the last `skip` lines.
+    skip=0 → last n lines; skip=100 → lines before the last 100, etc.
+    Returns [] if file doesn't exist."""
     try:
         if not log_path.exists():
             return []
         with open(log_path, "rb") as f:
-            # Efficient tail: seek from end
             f.seek(0, 2)
-            size = f.tell()
-            block = min(size, n * 200)  # estimate ~200 bytes per line
+            size  = f.tell()
+            # Read enough to cover n+skip lines
+            block = min(size, (n + skip) * 200)
             f.seek(max(0, size - block))
             lines = f.read().decode("utf-8", errors="replace").splitlines()
+        # lines[-skip:] are already loaded; we want the n before them
+        if skip == 0:
             return lines[-n:]
+        return lines[-(n + skip):-skip] if len(lines) > skip else []
     except Exception:
         return []
 
@@ -298,12 +303,17 @@ class SlotHandler:
             await self._handle_action(ws, msg)
 
         elif msg_type == "log_request":
-            # Subscribe to live log stream
             self._state.log_subscribers.add(ws)
-            # Send existing tail from file immediately
-            n     = msg.get("lines", 100)
-            lines = _tail_log_file(self._state.cfg.log_file_path, n)
-            await self._send(ws, {"type": "log_response", "lines": lines, "total": len(lines)})
+            n       = msg.get("lines", 100)
+            skip    = msg.get("skip", 0)
+            lines   = _tail_log_file(self._state.cfg.log_path, n, skip)
+            prepend = skip > 0
+            await self._send(ws, {
+                "type":    "log_response",
+                "lines":   lines,
+                "total":   len(lines),
+                "prepend": prepend,
+            })
 
         elif msg_type == "shutdown":
             log.info("Shutdown requested by rack")
