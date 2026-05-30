@@ -25,6 +25,7 @@ import config as cfg_module
 from llama_server import LlamaServer
 from model_scanner import GGUFModel, scan
 from git_updater import GitUpdater
+from parent_watchdog import watch_parent
 
 import re
 
@@ -195,62 +196,100 @@ class AppState:
 # PylonRack message builders
 # ---------------------------------------------------------------------------
 
-def _update_control(state: AppState) -> dict:
-    """Build the update button control based on current state."""
+def _version_label(state: AppState) -> dict:
+    """Build the version label — always present, info-only (no click action).
+    Shows current llama.cpp version with 'v' prefix, gray by default.
+    Tooltip changes to reflect update/stale state."""
+    version = state.llama_version
+    label   = f"v{version}" if not version.startswith("v") else version
+
+    if state.binary_stale:
+        tooltip = f"llama.cpp {label} — binary is older than the source tree"
+    elif state.update_available:
+        tooltip = f"llama.cpp {label} — newer version available upstream"
+    else:
+        tooltip = f"llama.cpp {label} — up to date"
+
+    return {
+        "id":       "version_label",
+        "type":     "label",
+        "value":    label,
+        "style":    "default",
+        "position": "trailing",
+        "tooltip":  tooltip,
+    }
+
+
+def _update_action_button(state: AppState) -> dict | None:
+    """Build the update/rebuild action button — returns None when there is
+    nothing to do (up to date). Slot returns the button only when the user
+    has an action to take, so the header stays uncluttered in the idle case."""
     if state.binary_stale:
         return {
-            "id":    "update",
-            "type":  "button",
-            "label": state.llama_version,
-            "style": "error",
-            "badge": True,
+            "id":       "update",
+            "type":     "button",
+            "label":    "Rebuild",
+            "style":    "error",
+            "icon":     "exclamationmark.triangle.fill",
+            "position": "trailing",
+            "tooltip":  "Binary is older than source tree — click to rebuild without pulling",
         }
     elif state.update_available:
         return {
-            "id":    "update",
-            "type":  "button",
-            "label": state.llama_version,
-            "style": "warning",
-            "badge": True,
+            "id":       "update",
+            "type":     "button",
+            "label":    "Update",
+            "style":    "warning",
+            "icon":     "arrow.triangle.2.circlepath",
+            "position": "trailing",
+            "tooltip":  "New commits available — click to pull and rebuild",
         }
-    else:
-        return {
-            "id":    "update",
-            "type":  "button",
-            "label": state.llama_version,
-            "style": "secondary",
-            "badge": False,
-        }
+    return None
+
+
+def _toggle_tooltip(running: bool) -> str:
+    return "Stop llama-server" if running else "Start llama-server"
 
 
 def _manifest(state: AppState) -> dict:
+    running  = state.llama.is_running
+    controls = [
+        {"id": "model_select", "type": "dropdown", "label": "Model",
+         "tooltip": "Select GGUF model"},
+        {"id": "toggle",       "type": "button",   "label": "Start", "style": "primary",
+         "tooltip": _toggle_tooltip(running)},
+        {"id": "status_label", "type": "label",    "value": "Idle",  "style": "default"},
+        _version_label(state),
+    ]
+    btn = _update_action_button(state)
+    if btn is not None:
+        controls.append(btn)
     return {
         "type":    "manifest",
         "name":    "llama.cpp",
         "version": "1.0",
         "heartbeat_interval": 5,
-        "controls": [
-            {"id": "model_select", "type": "dropdown", "label": "Model"},
-            {"id": "toggle",       "type": "button",   "label": "Start", "style": "primary"},
-            {"id": "status_label", "type": "label",    "value": "Idle",  "style": "default"},
-            _update_control(state),
-        ],
-        "ui_url": state.cfg.openwebui_url,
+        "controls": controls,
+        "ui_url":   state.cfg.openwebui_url,
     }
 
 
 def _controls_update(state: AppState) -> dict:
+    """Build a controls_update payload for fields that change on existing
+    controls. Does NOT add/remove the update button — use _manifest()
+    re-broadcast for structural changes (see _maybe_refresh_manifest)."""
     running = state.llama.is_running
-    ctrl    = _update_control(state)
+    version_lbl = _version_label(state)
     controls = [
         {
             "id":    "model_select",
             "value": state.selected_model.display_name if state.selected_model else "",
         },
         {
-            "id":    "toggle",
-            "label": "Stop" if running else "Start",
-            "style": "destructive" if running else "primary",
+            "id":      "toggle",
+            "label":   "Stop" if running else "Start",
+            "style":   "destructive" if running else "primary",
+            "tooltip": _toggle_tooltip(running),
         },
         {
             "id":    "status_label",
@@ -258,10 +297,9 @@ def _controls_update(state: AppState) -> dict:
             "style": _status_style(state),
         },
         {
-            "id":    "update",
-            "label": ctrl["label"],
-            "style": ctrl["style"],
-            "badge": ctrl["badge"],
+            "id":      "version_label",
+            "value":   version_lbl["value"],
+            "tooltip": version_lbl["tooltip"],
         },
     ]
     return {"type": "controls_update", "controls": controls}
@@ -508,6 +546,16 @@ class SlotHandler:
         # Subscribe this connection to live log
         self._state.log_subscribers.add(ws)
 
+        # Tell rack to suspend heartbeat — cmake build can take minutes
+        # during which we won't reply to ping. Without this, the rack would
+        # reconnect us mid-build, dropping the log stream and switching the
+        # body panel away from .log (workaround used to be a magic string
+        # comparison on the status_label control — fragile).
+        await self._send(ws, {
+            "type":   "pause_heartbeat",
+            "reason": "Rebuilding llama.cpp — may take several minutes",
+        })
+
         # Show "Updating…" in controls immediately
         await self._broadcast_update(ws)
 
@@ -531,6 +579,20 @@ class SlotHandler:
             self._state.llama_version = new_version
             self._state.binary_stale  = False
             await self._state._push_log_line(ws, f"✓ Build complete — {new_version}")
+
+        # Resume heartbeat now that the blocking op is done. Doing this
+        # before the restart below is safe — llama startup is fast enough
+        # that ping/pong won't time out.
+        await self._send(ws, {"type": "resume_heartbeat"})
+
+        # Rebuild changed structural state (no more update/rebuild button) —
+        # re-broadcast manifest so the rack drops the action button. Send to
+        # all clients, not just the one that triggered the update.
+        for client in list(self.clients):
+            try:
+                await client.send(json.dumps(_manifest(self._state)))
+            except Exception:
+                pass
 
         await self._broadcast_update(ws)
 
@@ -921,15 +983,34 @@ async def _check_updates_periodically(state: AppState, handler: "SlotHandler") -
             has_update   = await loop.run_in_executor(None, state.updater.has_update)
             binary_stale = await loop.run_in_executor(None, state.updater.is_binary_stale)
 
-            changed = (has_update   != state.update_available or
-                       binary_stale != state.binary_stale)
+            structural_changed = (
+                has_update   != state.update_available or
+                binary_stale != state.binary_stale
+            )
             state.update_available = has_update
             state.binary_stale     = binary_stale
             state.llama_version    = version
 
-            if changed:
-                # Send only the update button — avoids re-rendering all controls (no flicker)
-                ctrl = _update_control(state)
+            if structural_changed:
+                # Update button appears/disappears — must re-broadcast the
+                # full manifest so the rack re-renders the controls list.
+                # controls_update can only mutate existing controls.
+                for ws in list(handler.clients):
+                    try:
+                        await ws.send(json.dumps(_manifest(state)))
+                        await ws.send(json.dumps(_controls_update(state)))
+                    except Exception:
+                        pass
+                log.info("Update check (structural): version=%s has_update=%s binary_stale=%s",
+                         version, has_update, binary_stale)
+            else:
+                # Same structure — just refresh version label text/tooltip.
+                version_lbl = _version_label(state)
+                ctrl = {
+                    "id":      "version_label",
+                    "value":   version_lbl["value"],
+                    "tooltip": version_lbl["tooltip"],
+                }
                 for ws in list(handler.clients):
                     try:
                         await ws.send(json.dumps({
@@ -938,8 +1019,6 @@ async def _check_updates_periodically(state: AppState, handler: "SlotHandler") -
                         }))
                     except Exception:
                         pass
-                log.info("Update check: version=%s has_update=%s binary_stale=%s",
-                         version, has_update, binary_stale)
         await asyncio.sleep(1800)
 
 
@@ -957,6 +1036,9 @@ async def main() -> None:
     state.refresh_models()
 
     handler = SlotHandler(state)
+    # Self-terminate if rack process dies — prevents orphan processes that
+    # would hold the port open and block the next rack launch.
+    asyncio.create_task(watch_parent())
     asyncio.create_task(_check_updates_periodically(state, handler))
     asyncio.create_task(_watch_log_file(state, handler))
     log.info("PylonRack llama.cpp slot starting on ws://localhost:%d", port)

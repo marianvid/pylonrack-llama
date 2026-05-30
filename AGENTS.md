@@ -401,4 +401,51 @@ result = subprocess.run(["lsof", "-iTCP:<port>", "-sTCP:LISTEN", "-t"], ...)
   settings.json NEW FIELDS: selected_model, draft_model, draft_map, settings_map,
     server.temperature, server.top_p, server.top_k, server.repeat_penalty,
     server.flash_attn, server.mlock
+
+2026-05-30 — Heartbeat protocol + declarative controls
+  CONTEXT: Calibrate slot integration uncovered three weaknesses in the
+  llama slot's protocol surface; addressed all here.
+
+  HEARTBEAT PROTOCOL:
+  - server.py: sends {"type": "pause_heartbeat", "reason": "updating"} at
+    update start (just before git fetch/cmake), and {"type":
+    "resume_heartbeat"} just before llama-server restart.
+  - Rack-side: receiveLoop respects heartbeatPaused flag (replaces the
+    updateInProgress hack that compared a control label to "Updating…").
+  - Net effect: long cmake builds no longer trip the rack's missed-pong
+    timeout. The slot tells the rack "I'm intentionally going dark for a
+    bit" rather than the rack guessing.
+
+  VERSION CONTROL SPLIT:
+  - Old design: a single 3-in-1 button whose label and style cycled through
+    [Build XXXX (gray)] / [Update available (warning)] / [Rebuild (error)].
+    Confusing because state and action were conflated.
+  - New design: TWO controls.
+    * _version_label() — always present, gray label "vBxxxx", trailing
+      position, tooltip describes state.
+    * _update_action_button() — returns None when up-to-date, otherwise
+      "Update" (warning) or "Rebuild" (error) with appropriate SF Symbol.
+  - _check_updates_periodically re-broadcasts the FULL manifest when the
+    action button appears/disappears (controls_update can only mutate
+    existing controls, not add/remove them).
+
+  DECLARATIVE CONTROL PROPERTIES:
+  - All controls now use the new manifest properties:
+    * position: "trailing" for version label + update button (they belong
+      on the right side of the header, before mode buttons)
+    * tooltip: descriptive hover text on every control
+    * icon: SF Symbols (arrow.triangle.2.circlepath for update,
+      exclamationmark.triangle.fill for rebuild)
+  - Replaces the previous magic `id == "update"` placement check in the rack.
+
+  modes manifest field:
+  - Now explicitly declares modes: ["log", "models", "settings"] (all three
+    are meaningful for the llama slot). Documentation hygiene — the
+    default would have been the same set, but explicit declaration prevents
+    surprises if rack defaults change.
+
+  parent_watchdog.py:
+  - IDENTICAL copy added (same file shared with calibrate slot). Polls
+    os.getppid() every 2s; self-SIGTERMs when parent becomes pid=1.
+    Eliminates orphaned llama-server processes after rack crash.
 ```
