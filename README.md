@@ -14,23 +14,42 @@ native rack adds the operational controls around it.
 
 ## What it does
 
-- **Model dropdown** — scans your HuggingFace cache and lists all `.gguf` files
+- **Model dropdown** — quickly switches between GGUF models already available
+  in the configured local Hugging Face cache
 - **Start / Stop** — launches and stops `llama-server` with your configured parameters
-- **Update button** — shows current llama.cpp build version (e.g. `b9371`); orange badge when updates available, red badge when binary is outdated vs sources; click to pull + rebuild with live log output
+- **Version and update state** — reports the built llama.cpp version and exposes
+  Update or Rebuild only when action is needed, with live build output
 - **Metrics** — RAM usage and active requests shown in the status bar
 - **Log** — llama-server stdout streamed live to the rack log panel
 - **Chat UI** — llama.cpp built-in web UI displayed in the rack body panel (served directly by llama-server on the same port)
-- **Model Manager** — browse HuggingFace, download new models, delete existing ones
+- **Model Manager** — inspect locally available models or search Hugging Face,
+  compare GGUF quantizations and download a selected file
 
-## Interface
+## Native header
 
-| Local models | Browse Hugging Face |
+PylonRack keeps the controls needed during everyday use in the native header:
+
+| Control | Purpose |
 |---|---|
-| ![Local GGUF models](docs/images/llama-local-models.png) | ![Hugging Face browser](docs/images/llama-huggingface.png) |
+| Model dropdown | Switch the active local GGUF model |
+| Start / Stop | Control the managed `llama-server` process |
+| Status | Show transitions such as Idle, Starting, Running and Updating |
+| `vbNNNN` | Report the currently built llama.cpp version |
+| Update | Pull and rebuild llama.cpp when an update or rebuild is needed |
+| Document | Toggle the process log |
+| Grid | Toggle between llama.cpp chat and model management |
+| Gear | Open per-model server and sampling settings |
 
-The Models control toggles between model management and the built-in llama.cpp
-chat. The model dropdown remains available in the native header, together with
-runtime state and update status.
+## Browse Hugging Face
+
+Search GGUF repositories, inspect their available files and quantizations, and
+download a selected model without leaving PylonRack.
+
+![Browse and download GGUF models from Hugging Face](docs/images/llama-huggingface.png)
+
+The model manager also has a Local Models view for inspecting or removing files
+already present in the cache. The model dropdown in the header remains the
+fastest way to switch the model used by `llama-server`.
 
 ![Per-model llama-server settings](docs/images/llama-settings.png)
 
@@ -126,19 +145,6 @@ pip install -r requirements.txt
 
 ---
 
-## Controls
-
-| Control | Type | Description |
-|---------|------|-------------|
-| Model dropdown | Dropdown | Select from all `.gguf` files in HF cache |
-| Start / Stop | Button | Toggle llama-server |
-| bNNNN | Button | llama.cpp build version; badge = update available or binary outdated |
-| Status | Label | Idle / Starting… / Running / Stopping… / Updating… |
-| 📄 | Toggle | Show/hide process log |
-| ⊞ | Toggle | Show/hide model manager |
-
----
-
 ## Update mechanism
 
 - At startup and every 30 minutes, checks for new commits and binary staleness
@@ -173,5 +179,9 @@ pylonrack-llama/
 
 ## License
 
-MIT — use freely, no warranty. Personal project built through human–AI
-collaboration; use at your own risk.
+MIT — use freely, no warranty.
+
+PylonRack is a personal human–AI collaboration. It was designed and directed
+by an experienced software developer exploring native macOS and Swift
+development for the first time, with AI assisting implementation, testing and
+documentation. Use at your own risk.
