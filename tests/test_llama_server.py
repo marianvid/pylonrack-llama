@@ -331,6 +331,7 @@ class TestUIFeedback(unittest.IsolatedAsyncioTestCase):
         model_b = GGUFModel("org/ModelB", "/path/b.gguf", 8.0)
         state.models = [model_a, model_b]
         state.selected_model = model_a
+        state._draft_map = {}
 
         sent = []
         async def mock_send(ws, data): sent.append(data)
@@ -370,6 +371,7 @@ class TestUIFeedback(unittest.IsolatedAsyncioTestCase):
         model_b = GGUFModel("org/ModelB", "/path/b.gguf", 8.0)
         state.models = [model_a, model_b]
         state.selected_model = model_a
+        state._draft_map = {}
 
         sent = []
         async def mock_send(ws, data): sent.append(data)

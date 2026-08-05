@@ -526,6 +526,11 @@ class SlotHandler:
             else:
                 log.error("llama-server failed to start")
             await self._broadcast_update(ws)
+            if ok:
+                # Webview was loaded while llama was down (dead target → blank
+                # page). Now that the server is listening, tell the rack to
+                # reload the WebView — same as the model_select restart path.
+                await self._send(ws, {"type": "reload_ui"})
 
     async def _handle_update(self, ws: WebSocketServerProtocol) -> None:
         if self._state.update_in_progress:

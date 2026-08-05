@@ -1,6 +1,14 @@
 # pylonrack-llama
 
-PylonRack slot application for **llama.cpp** — manages a `llama-server` process and exposes it to the rack with model selection, start/stop, update detection, live build log, and llama.cpp built-in chat UI.
+PylonRack slot application for **llama.cpp** — a native control surface for
+quickly discovering, downloading, selecting, updating and trying local GGUF
+models without moving between terminal commands and separate applications.
+
+It is not intended to replace Ollama or LM Studio. It keeps llama.cpp itself at
+the centre: the original built-in chat UI is embedded unchanged, while the
+native rack adds the operational controls around it.
+
+![llama.cpp chat embedded in PylonRack](docs/images/llama-chat.png)
 
 ---
 
@@ -13,6 +21,18 @@ PylonRack slot application for **llama.cpp** — manages a `llama-server` proces
 - **Log** — llama-server stdout streamed live to the rack log panel
 - **Chat UI** — llama.cpp built-in web UI displayed in the rack body panel (served directly by llama-server on the same port)
 - **Model Manager** — browse HuggingFace, download new models, delete existing ones
+
+## Interface
+
+| Local models | Browse Hugging Face |
+|---|---|
+| ![Local GGUF models](docs/images/llama-local-models.png) | ![Hugging Face browser](docs/images/llama-huggingface.png) |
+
+The Models control toggles between model management and the built-in llama.cpp
+chat. The model dropdown remains available in the native header, together with
+runtime state and update status.
+
+![Per-model llama-server settings](docs/images/llama-settings.png)
 
 ---
 
@@ -153,4 +173,5 @@ pylonrack-llama/
 
 ## License
 
-MIT — use freely, no warranty.
+MIT — use freely, no warranty. Personal project built through human–AI
+collaboration; use at your own risk.
