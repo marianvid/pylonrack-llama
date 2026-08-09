@@ -16,6 +16,7 @@ import logging
 import os
 import subprocess
 import threading
+from collections import deque
 from pathlib import Path
 
 import websockets
@@ -163,19 +164,51 @@ class AppState:
         self.binary_stale:       bool = False
         self.log_subscribers: set = set()
         self.llama_version:   str = "llama"  # populated async after startup
+        # Build-log plumbing. cmake emits thousands of lines in bursts. Pushing
+        # each one as its own coroutine floods the event loop, starves
+        # ping/pong and silently kills the connection mid-build. The build
+        # thread only appends here; the loop flushes in batches.
+        self.build_log_lock: threading.Lock = threading.Lock()
+        self.build_log_pending: list[str] = []
+        self.build_log_tail: deque = deque(maxlen=500)  # replay on reconnect
 
-    @staticmethod
-    async def _push_log_line(ws, line: str) -> None:
-        """Push a single log line to a subscriber (used by update handler)."""
-        try:
-            import json
-            await ws.send(json.dumps({
-                "type":  "log_response",
-                "lines": [line],
-                "total": -1,
-            }))
-        except Exception:
-            pass
+    def queue_build_line(self, line: str) -> None:
+        """Append a build-output line. Called from the build thread only —
+        deliberately does not touch the event loop."""
+        with self.build_log_lock:
+            self.build_log_pending.append(line)
+            self.build_log_tail.append(line)
+
+    def drain_build_lines(self) -> list[str]:
+        """Take everything buffered so far. Called from the event loop."""
+        with self.build_log_lock:
+            if not self.build_log_pending:
+                return []
+            out, self.build_log_pending = self.build_log_pending, []
+            return out
+
+    async def push_log_lines(self, lines: list[str]) -> None:
+        """Broadcast a batch to every log subscriber. A subscriber whose send
+        fails is dropped — previously these failures were swallowed, so a dead
+        connection kept receiving into the void and nothing ever noticed."""
+        if not lines:
+            return
+        import json
+        payload = json.dumps({
+            "type":  "log_response",
+            "lines": lines,
+            "total": -1,
+        })
+        for sub in list(self.log_subscribers):
+            try:
+                await sub.send(payload)
+            except Exception:
+                self.log_subscribers.discard(sub)
+
+    async def _push_log_line(self, ws, line: str) -> None:
+        """Single-line push, kept for existing call sites."""
+        self.build_log_tail.append(line)
+        await self.push_log_lines([line])
 
     def refresh_models(self) -> None:
         self.models = scan(self.cfg.hf_cache_path)
@@ -551,30 +584,39 @@ class SlotHandler:
         # Subscribe this connection to live log
         self._state.log_subscribers.add(ws)
 
-        # Tell rack to suspend heartbeat — cmake build can take minutes
-        # during which we won't reply to ping. Without this, the rack would
-        # reconnect us mid-build, dropping the log stream and switching the
-        # body panel away from .log (workaround used to be a magic string
-        # comparison on the status_label control — fragile).
-        await self._send(ws, {
-            "type":   "pause_heartbeat",
-            "reason": "Rebuilding llama.cpp — may take several minutes",
-        })
+        # Heartbeat is deliberately NOT paused any more.
+        #
+        # The old comment claimed we cannot answer ping during the build. That
+        # was wrong: the build runs in an executor, so the loop stays free.
+        # What actually starved the loop was one coroutine per log line (see
+        # AppState.queue_build_line). Now that lines are batched, ping/pong
+        # keeps working — and it is the only thing that detects a dead
+        # connection. Pausing it is what left the UI stuck on "Updating…"
+        # after the socket died at 82%.
 
         # Show "Updating…" in controls immediately
         await self._broadcast_update(ws)
 
         loop = asyncio.get_event_loop()
 
+        # Build thread only buffers; a single loop task flushes in batches.
         def _run_update():
-            def on_line(line: str):
-                asyncio.run_coroutine_threadsafe(
-                    self._state._push_log_line(ws, line), loop
-                )
-            return self._state.updater.update(on_line)
+            return self._state.updater.update(self._state.queue_build_line)
 
-        ok = await loop.run_in_executor(None, _run_update)
-        self._state.update_in_progress = False
+        async def _flush_build_log():
+            while True:
+                await asyncio.sleep(0.2)
+                await self._state.push_log_lines(self._state.drain_build_lines())
+
+        flusher = asyncio.create_task(_flush_build_log())
+        try:
+            ok = await loop.run_in_executor(None, _run_update)
+        finally:
+            flusher.cancel()
+            # Whatever the outcome, the tail of the build output must reach the
+            # UI. Losing it is how a finished build looked like a hung one.
+            await self._state.push_log_lines(self._state.drain_build_lines())
+            self._state.update_in_progress = False
 
         # Refresh version in background (slow)
         if ok:
@@ -585,10 +627,9 @@ class SlotHandler:
             self._state.binary_stale  = False
             await self._state._push_log_line(ws, f"✓ Build complete — {new_version}")
 
-        # Resume heartbeat now that the blocking op is done. Doing this
-        # before the restart below is safe — llama startup is fast enough
-        # that ping/pong won't time out.
-        await self._send(ws, {"type": "resume_heartbeat"})
+        if not ok:
+            await self._state.push_log_lines(
+                ["✗ Update failed — llama.cpp was not rebuilt."])
 
         # Rebuild changed structural state (no more update/rebuild button) —
         # re-broadcast manifest so the rack drops the action button. Send to

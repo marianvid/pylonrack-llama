@@ -107,17 +107,39 @@ class GitUpdater:
                 for line in proc.stdout:
                     self._emit(progress_callback, line.rstrip())
                 proc.wait()
+                # Every step reports its outcome explicitly. Silence used to be
+                # indistinguishable between "still working" and "finished".
                 if proc.returncode != 0:
-                    self._emit(progress_callback, f"FAILED (exit {proc.returncode})")
+                    self._emit(progress_callback,
+                               f"✗ {label} FAILED (exit {proc.returncode})")
                     return False
+                self._emit(progress_callback, f"✓ {label} done (exit 0)")
             except Exception as exc:
                 self._emit(progress_callback, f"ERROR: {exc}")
                 return False
 
-        # Verify binary is newer than before
+        # Verify the binary actually exists and reports a version. A green
+        # "complete" with no binary behind it is the kind of quiet lie this
+        # whole fix is about.
         binary = self._repo / "build" / "bin" / "llama-server"
-        self._emit(progress_callback, f"Binary: {binary} — built successfully.")
-        self._emit(progress_callback, "Update complete.")
+        if not binary.exists():
+            self._emit(progress_callback,
+                       f"✗ Build reported success but {binary} is missing.")
+            return False
+        try:
+            out = subprocess.run([str(binary), "--version"],
+                                 capture_output=True, text=True, timeout=20)
+            ver = (out.stderr + out.stdout).strip().splitlines()
+            self._emit(progress_callback,
+                       f"Binary: {binary}")
+            if ver:
+                self._emit(progress_callback, ver[0])
+        except Exception as exc:
+            self._emit(progress_callback,
+                       f"✗ Binary built but does not run: {exc}")
+            return False
+
+        self._emit(progress_callback, "✓ Update complete.")
         return True
 
     @staticmethod
