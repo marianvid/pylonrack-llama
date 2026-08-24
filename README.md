@@ -1,5 +1,10 @@
 # pylonrack-llama
 
+> [!NOTE]
+> **Archived:** this project is no longer actively maintained and remains public
+> for reference. Active local-inference development continues in
+> [ai-lab](https://github.com/marianvid/ai-lab).
+
 PylonRack slot application for **llama.cpp** — a native control surface for
 quickly discovering, downloading, selecting, updating and trying local GGUF
 models without moving between terminal commands and separate applications.
